@@ -71,6 +71,15 @@ typedef struct
   uint32_t windows;             /* valid windows since warm-up                 */
   int64_t  total;               /* encoder counts since warm-up                */
   uint64_t cycles;              /* CPU cycles elapsed since warm-up            */
+
+  /* Speed: sliding sum over the last ENC_WIN windows, counts / real cycles. */
+  int32_t  winD[16];            /* counts of each window (ENC_WIN entries)     */
+  uint32_t winDc[16];           /* CPU cycles of each window                   */
+  uint32_t winIdx;              /* slot to overwrite next                      */
+  uint32_t winN;                /* valid slots, grows to ENC_WIN               */
+  int32_t  sumD;                /* sum of winD                                 */
+  uint32_t sumDc;               /* sum of winDc                                */
+  int32_t  rpm10;               /* speed in 0.1 rpm, signed (sign = direction) */
 } EncStats_t;
 /* USER CODE END PTD */
 
@@ -101,6 +110,13 @@ typedef struct
 #define ACQ_PRIORITY          22U   /* above A and B, below ctxRx           */
 #define ACQ_BIT_HALF          (1UL << 0)
 #define ACQ_BIT_FULL          (1UL << 1)
+
+/* Speed estimate: encoder lines per revolution (x4 gives 4 counts per line)
+   and the number of 1 ms windows in the sliding sum. */
+#define ENC_LINES             500U
+#define ENC_WIN               16U
+_Static_assert(ENC_WIN == sizeof(((EncStats_t *)0)->winD) / sizeof(int32_t),
+               "EncStats_t.winD/winDc size must match ENC_WIN");
 
 /* Fail-stop self-test, run from the acquisition task 5 s after start.
    0 = off (reference build), 1 = call the CSS callback, 2 = call Error_Handler,
@@ -285,6 +301,32 @@ static void enc_update(uint32_t cyc, uint32_t cnt)
   g_enc.total  += d;
   g_enc.cycles += dc;
   g_enc.windows++;
+
+  /* Sliding sum: drop the oldest window once the buffer is full, add the new one. */
+  const uint32_t i = g_enc.winIdx;
+  if (g_enc.winN == ENC_WIN)
+  {
+    g_enc.sumD  -= g_enc.winD[i];
+    g_enc.sumDc -= g_enc.winDc[i];
+  }
+  else
+  {
+    g_enc.winN++;
+  }
+  g_enc.winD[i]  = d;
+  g_enc.winDc[i] = dc;
+  g_enc.sumD    += d;
+  g_enc.sumDc   += dc;
+  g_enc.winIdx   = (i + 1U) % ENC_WIN;
+
+  /* rpm = sumD / (4 * LINES) / (sumDc / f_cpu) * 60 ; in 0.1 rpm: x150.
+     Numerator reaches ~4e13 at 6000 rpm, so the maths is done in 64 bits. */
+  if (g_enc.sumDc != 0U)
+  {
+    const int64_t num = (int64_t)g_enc.sumD * (int64_t)SystemCoreClock * 150;
+    const int64_t den = (int64_t)ENC_LINES * (int64_t)g_enc.sumDc;
+    g_enc.rpm10 = (int32_t)((num >= 0 ? num + den / 2 : num - den / 2) / den);
+  }
 }
 
 /* Acquisition task: woken by the DMA half/full-transfer interrupt.
