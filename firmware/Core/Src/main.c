@@ -115,6 +115,10 @@ typedef struct
    and the number of 1 ms windows in the sliding sum. */
 #define ENC_LINES             500U
 #define ENC_WIN               16U
+
+/* TEMPORARY open-loop test of the ESP32 motor model: fixed PWM duty on PA9.
+   TIM1 period is 4000 ticks, so 2000 = 50 %. Set back to 0 for the reference build. */
+#define MOTOR_TEST_DUTY_TICKS 2000U
 _Static_assert(ENC_WIN == sizeof(((EncStats_t *)0)->winD) / sizeof(int32_t),
                "EncStats_t.winD/winDc size must match ENC_WIN");
 
@@ -342,9 +346,9 @@ static void AcqTask(void *arg)
   __HAL_DBGMCU_FREEZE_TIM1();
   __HAL_DBGMCU_FREEZE_TIM2();   /* keeps encoder counts consistent with DWT, which also stops */
 
-  /* Motor PWM: start at 0 % duty. HAL_TIM_PWM_Start also sets MOE,
-     the main output enable of the advanced timer. */
-  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, 0U);
+  /* Motor PWM: start at MOTOR_TEST_DUTY_TICKS (0 = 0 %). HAL_TIM_PWM_Start
+     also sets MOE, the main output enable of the advanced timer. */
+  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, MOTOR_TEST_DUTY_TICKS);
   if (HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_2) != HAL_OK)
   {
     Error_Handler();
@@ -420,10 +424,13 @@ static void AcqTask(void *arg)
     g_acq.lastMv  = (avg * 3300U) / 4095U;
     g_acq.blocks++;
 
+#if MOTOR_TEST_DUTY_TICKS == 0U
     /* Temporary open loop (phase 2 test): setpoint 0..4095 -> duty 0..3999.
-       Replaced by the PI controller output in phase 4. */
+       Replaced by the PI controller output in phase 4. With a fixed test duty
+       (MOTOR_TEST_DUTY_TICKS != 0) the pot is ignored. */
     const uint32_t duty = (avg * (__HAL_TIM_GET_AUTORELOAD(&htim1) + 1U)) / 4096U;
     __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, duty);
+#endif
 
     HAL_GPIO_WritePin(TP_TASK_C_GPIO_Port, TP_TASK_C_Pin, GPIO_PIN_RESET);
   }
