@@ -75,6 +75,7 @@ bool net_begin()
       delay(5);
     }
     if (WiFi.status() == WL_CONNECTED) {
+      WiFi.setSleep(false);          /* no modem sleep: ~150 ms of extra latency otherwise (live dashboard) */
       MDNS.begin(HOSTNAME);
       MDNS.addService("http", "tcp", 80);
       Serial.printf("[WIFI] connected: http://%s.local  or  http://%s  (%d dBm)\n",

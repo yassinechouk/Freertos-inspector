@@ -124,13 +124,28 @@ static void printStats()
 
 /* Case-insensitive; "mode test" and "test" both work; "sp 800" and "sp=800" too.
    "wifi set <ssid> <password>" is handled first, before lowercasing (SSID and password
-   are case-sensitive; no spaces in either). The password is never printed. */
+   are case-sensitive). An SSID with spaces goes between double quotes:
+   wifi set "My Network" secret. The password (no spaces) is never printed. */
 static void handleConsoleLine(char *line)
 {
   if (!strncasecmp(line, "wifi set ", 9)) {
     char ssid[33] = {0}, pass[65] = {0};
-    if (sscanf(line + 9, "%32s %64s", ssid, pass) >= 1) net_save_and_restart(ssid, pass);
-    else Serial.println("usage: wifi set <ssid> <password>");
+    const char *p = line + 9;
+    while (*p == ' ') p++;
+    bool ok = false;
+    if (*p == '"') {
+      const char *end = strchr(p + 1, '"');
+      const size_t n = end ? (size_t)(end - p - 1) : 0;
+      if (end != nullptr && n > 0 && n < sizeof ssid) {
+        memcpy(ssid, p + 1, n);
+        sscanf(end + 1, " %64s", pass);
+        ok = true;
+      }
+    } else {
+      ok = sscanf(p, "%32s %64s", ssid, pass) >= 1;
+    }
+    if (ok) net_save_and_restart(ssid, pass);
+    else Serial.println("usage: wifi set <ssid> <password>   (or wifi set \"ssid with spaces\" <password>)");
     return;
   }
 
