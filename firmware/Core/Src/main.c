@@ -25,6 +25,8 @@
 #include "FreeRTOS.h"
 #include "task.h"
 #include "hil_proto.h"
+#include "timers.h"
+#include "rtos_trace.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -209,11 +211,23 @@ _Static_assert(REC_LEN == sizeof(((CtlRec_t *)0)->sp) / sizeof(int16_t),
    control task. RX is a circular DMA buffer polled by the same task. */
 #define LINK_PERIOD_MS        10U
 #define LINK_PRIORITY         10U   /* above the health task, below all control tasks */
-#define LINK_BUF_LEN          160U
+#define LINK_BUF_LEN          1024U
 #define LINK_RX_LEN           256U
 #define LINK_HEARTBEAT_DIV    10U
 #define LINK_DEADMAN_MS       1000U /* REMOTE: no frame for this long -> setpoint ramps to 0 */
 #define LINK_MAX_EVENTS       2U    /* events per TX cycle, to bound the buffer */
+#define LINK_TRACE_MAX_EVENTS 180U  /* trace events per TX cycle (6 frames); the rest waits in the ring */
+
+/* RTOS doctor: task tags (rtos_trace.h), declared once here with each task's timing. */
+#define TAG_ACQ               1U
+#define TAG_CTXRX             2U
+#define TAG_TASKA             3U
+#define TAG_TASKB             4U
+#define TAG_CTXTX             5U
+#define TAG_LINK              6U
+#define TAG_HEALTH            7U
+#define TAG_IDLE              8U
+#define TAG_TIMER             9U
 #define CTL_DEFAULT_MODE      HIL_MODE_IDLE   /* HIL_MODE_TEST for a bench without supervisor */
 #define CTL_RPM_MAX           3000.0f
 #define CTL_SLEW_RPM_PER_MS   3.0f          /* 3000 rpm/s on LOCAL and REMOTE setpoints */
@@ -342,9 +356,11 @@ static void TaskA(void *arg)
   for (;;)
   {
     vTaskDelayUntil(&lastWake, period);
+    rt_job_begin(TAG_TASKA, rt_release_from_tick(lastWake));
     HAL_GPIO_WritePin(TP_TASK_A_GPIO_Port, TP_TASK_A_Pin, GPIO_PIN_SET);
     busy_work_us(TASK_A_WORK_US);
     HAL_GPIO_WritePin(TP_TASK_A_GPIO_Port, TP_TASK_A_Pin, GPIO_PIN_RESET);
+    rt_job_end(TAG_TASKA);
   }
 }
 
@@ -357,9 +373,11 @@ static void TaskB(void *arg)
   for (;;)
   {
     vTaskDelayUntil(&lastWake, period);
+    rt_job_begin(TAG_TASKB, rt_release_from_tick(lastWake));
     HAL_GPIO_WritePin(TP_TASK_B_GPIO_Port, TP_TASK_B_Pin, GPIO_PIN_SET);
     busy_work_us(TASK_B_WORK_US);
     HAL_GPIO_WritePin(TP_TASK_B_GPIO_Port, TP_TASK_B_Pin, GPIO_PIN_RESET);
+    rt_job_end(TAG_TASKB);
   }
 }
 
@@ -380,8 +398,10 @@ static void CtxRxTask(void *arg)
   for (;;)
   {
     (void)ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    rt_job_begin(TAG_CTXRX, g_ctxT0);
     const uint32_t dt = DWT->CYCCNT - g_ctxT0;
     stats_add(&g_ctxSwitch, dt);
+    rt_job_end(TAG_CTXRX);
   }
 }
 
@@ -397,8 +417,10 @@ static void CtxTxTask(void *arg)
   for (;;)
   {
     vTaskDelayUntil(&lastWake, period);
+    rt_job_begin(TAG_CTXTX, rt_release_from_tick(lastWake));
     g_ctxT0 = DWT->CYCCNT;
     xTaskNotifyGive(hCtxRx);
+    rt_job_end(TAG_CTXTX);
   }
 }
 
@@ -800,6 +822,95 @@ static void link_supervise(void)
   }
 }
 
+/* ---- RTOS layer frames (rtos_trace.h, HIL_T_TASK_* / HIL_T_TRACE / HIL_T_RTOS_SYS) ---- */
+
+static uint32_t trCycTmp[LINK_TRACE_MAX_EVENTS];
+static uint8_t  trIdTmp[LINK_TRACE_MAX_EVENTS];
+
+/* Drains the trace ring into TRACE frames: t0, then (id, 24-bit delta) per event. */
+static uint32_t link_add_trace(uint32_t n)
+{
+  const uint32_t k = rt_trace_read(trCycTmp, trIdTmp, LINK_TRACE_MAX_EVENTS);
+  const uint16_t dropped = (uint16_t)rt_trace_dropped();
+  uint32_t i = 0U;
+  while (i < k)
+  {
+    uint8_t pl[HIL_MAX_PAYLOAD];
+    uint32_t len = 6U;
+    uint32_t prev = trCycTmp[i];
+    hil_put_u32(&pl[0], prev);
+    hil_put_u16(&pl[4], dropped);
+    while ((i < k) && ((len + 4U) <= HIL_MAX_PAYLOAD))
+    {
+      const uint32_t d = trCycTmp[i] - prev;
+      if (d > 0xFFFFFFU) { break; }                          /* too long for 24 bits: new frame, new t0 */
+      pl[len]      = trIdTmp[i];
+      pl[len + 1U] = (uint8_t)d;
+      pl[len + 2U] = (uint8_t)(d >> 8);
+      pl[len + 3U] = (uint8_t)(d >> 16);
+      len += 4U;
+      prev = trCycTmp[i];
+      i++;
+    }
+    n = link_add(n, HIL_T_TRACE, pl, (uint8_t)len);
+  }
+  return n;
+}
+
+static uint32_t link_add_task_table(uint32_t n, uint8_t tag)
+{
+  RtTaskInfo_t ti;
+  if (rt_task_info(tag, &ti) == 0) { return n; }
+  uint8_t pl[32];
+  pl[0] = tag;
+  pl[1] = ti.priority;
+  hil_put_u16(&pl[2], ti.periodMs);
+  hil_put_u16(&pl[4], ti.deadlineMs);
+  hil_put_u32(&pl[6], ti.wcetCycles);
+  hil_put_u16(&pl[10], ti.stackWords);
+  hil_put_u32(&pl[12], SystemCoreClock);
+  uint32_t len = 16U;
+  for (const char *c = ti.name; (*c != '\0') && (len < sizeof pl); c++) { pl[len++] = (uint8_t)*c; }
+  return link_add(n, HIL_T_TASK_TABLE, pl, (uint8_t)len);
+}
+
+static uint32_t link_add_task_stats(uint32_t n, uint8_t tag)
+{
+  RtTaskInfo_t ti;
+  if (rt_task_info(tag, &ti) == 0) { return n; }
+  RtTaskStats_t st;
+  rt_task_stats(tag, &st);
+  uint8_t pl[25];
+  pl[0] = tag;
+  hil_put_u16(&pl[1], st.cpuPermille);
+  hil_put_u16(&pl[3], st.jobs);
+  hil_put_u32(&pl[5], st.cMax);
+  hil_put_u32(&pl[9], st.cAvg);
+  hil_put_u32(&pl[13], st.rMax);
+  hil_put_u32(&pl[17], st.rMin);
+  hil_put_u16(&pl[21], st.misses);
+  hil_put_u16(&pl[23], st.stackFree);
+  return link_add(n, HIL_T_TASK_STATS, pl, (uint8_t)sizeof pl);
+}
+
+static uint32_t link_add_rtos_sys(uint32_t n)
+{
+  RtSysStats_t s;
+  RtTaskStats_t idle;
+  rt_sys_stats(&s);
+  rt_task_stats(TAG_IDLE, &idle);
+  uint8_t pl[28];
+  hil_put_u32(&pl[0], SystemCoreClock);
+  hil_put_u32(&pl[4], s.switches);
+  hil_put_u32(&pl[8], s.events);
+  hil_put_u32(&pl[12], s.dropped);
+  hil_put_u16(&pl[16], idle.cpuPermille);
+  hil_put_u16(&pl[18], (uint16_t)configTICK_RATE_HZ);
+  hil_put_u32(&pl[20], g_ctxSwitch.max);
+  hil_put_u32(&pl[24], g_isrToTask.max);
+  return link_add(n, HIL_T_RTOS_SYS, pl, (uint8_t)sizeof pl);
+}
+
 /* Lowest-priority real-time job: it may be late, it must never delay control. */
 static void LinkTask(void *arg)
 {
@@ -807,6 +918,13 @@ static void LinkTask(void *arg)
   const TickType_t period = pdMS_TO_TICKS(LINK_PERIOD_MS);
   TickType_t lastWake = xTaskGetTickCount();
   uint32_t hbDiv = 0U;
+  uint32_t cycle = 0U;
+  uint8_t  statTag = 0U;                                     /* next task whose stats are sent (0 = none) */
+  uint8_t  tableTag = 1U;
+
+  /* The idle and timer tasks exist only once the scheduler runs: tag them here. */
+  rt_register(TAG_IDLE, xTaskGetIdleTaskHandle(), "idle", 0U, 0U, 0U, configMINIMAL_STACK_SIZE);
+  rt_register(TAG_TIMER, xTimerGetTimerDaemonTaskHandle(), "timers", 0U, 0U, 0U, configTIMER_TASK_STACK_DEPTH);
 
   hil_parser_init(&rxParser);
   hil_seq_init(&rxSeq);
@@ -816,6 +934,7 @@ static void LinkTask(void *arg)
   for (;;)
   {
     vTaskDelayUntil(&lastWake, period);
+    rt_job_begin(TAG_LINK, rt_release_from_tick(lastWake));
 
     link_rx_poll();
     link_supervise();
@@ -825,11 +944,19 @@ static void LinkTask(void *arg)
     n = link_add_acks(n);
     n = link_add_events(n);
 
+    /* RTOS layer: statistics once per second (one task per cycle), configuration of one
+       task every 200 ms (the whole table every few seconds), trace every cycle. */
+    cycle++;
+    if ((cycle % 100U) == 0U) { rt_second(); n = link_add_rtos_sys(n); statTag = 1U; }
+    if ((statTag != 0U) && (statTag < RT_MAX_TAGS)) { n = link_add_task_stats(n, statTag); statTag++; }
+    if ((cycle % 20U) == 0U) { n = link_add_task_table(n, tableTag); tableTag = (uint8_t)((tableTag % (RT_MAX_TAGS - 1U)) + 1U); }
+    n = link_add_trace(n);
+
     (void)ulTaskNotifyTake(pdTRUE, 0U);                 /* drop a stale completion */
     if (HAL_UART_Transmit_DMA(&huart1, linkBuf, (uint16_t)n) == HAL_OK)
     {
       g_link.sent++;
-      if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(5U)) == 0U)
+      if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(8U)) == 0U)
       {
         g_link.timeouts++;
       }
@@ -838,6 +965,7 @@ static void LinkTask(void *arg)
     {
       g_link.busy++;
     }
+    rt_job_end(TAG_LINK);
   }
 }
 
@@ -882,6 +1010,7 @@ static void AcqTask(void *arg)
   {
     uint32_t bits = 0U;
     (void)xTaskNotifyWait(0U, ACQ_BIT_HALF | ACQ_BIT_FULL, &bits, portMAX_DELAY);
+    rt_job_begin(TAG_ACQ, g_isrT0);                          /* released by the DMA interrupt */
 
     const uint32_t dt = DWT->CYCCNT - g_isrT0;
     if (warmup > 0U)
@@ -937,6 +1066,7 @@ static void AcqTask(void *arg)
     ctl_update(g_acq.blocks);
 
     HAL_GPIO_WritePin(TP_TASK_C_GPIO_Port, TP_TASK_C_Pin, GPIO_PIN_RESET);
+    rt_job_end(TAG_ACQ);
   }
 }
 /* USER CODE END 0 */
@@ -978,6 +1108,7 @@ int main(void)
   MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
   dwt_init();
+  rt_init();
 
   /* Calibrate the ADC once, while it is still disabled. */
   if (HAL_ADCEx_Calibration_Start(&hadc1, ADC_SINGLE_ENDED) != HAL_OK)
@@ -1033,6 +1164,17 @@ int main(void)
   hLink = xTaskCreateStatic(LinkTask, "link", TASK_STACK_WORDS, NULL,
                             LINK_PRIORITY, link_Stack, &link_TCB);
   configASSERT(hLink != NULL);
+
+  /* RTOS doctor: the single declaration of each task's timing (period, deadline, declared C).
+     ctxRx is sporadic: woken by ctxTx, so its minimum inter-arrival time is ctxTx's period. */
+  const uint32_t cyclesPerUs = SystemCoreClock / 1000000U;
+  rt_register(TAG_ACQ,    hAcq,   "acq",    1U, 1U, 0U, TASK_STACK_WORDS);
+  rt_register(TAG_CTXRX,  hCtxRx, "ctxRx",  CTX_TX_PERIOD_MS, 0U, 0U, TASK_STACK_WORDS);
+  rt_register(TAG_TASKA,  hTaskA, "taskA",  TASK_A_PERIOD_MS, TASK_A_PERIOD_MS, TASK_A_WORK_US * cyclesPerUs, TASK_STACK_WORDS);
+  rt_register(TAG_TASKB,  hTaskB, "taskB",  TASK_B_PERIOD_MS, TASK_B_PERIOD_MS, TASK_B_WORK_US * cyclesPerUs, TASK_STACK_WORDS);
+  rt_register(TAG_CTXTX,  hCtxTx, "ctxTx",  CTX_TX_PERIOD_MS, CTX_TX_PERIOD_MS, 0U, TASK_STACK_WORDS);
+  rt_register(TAG_LINK,   hLink,  "link",   LINK_PERIOD_MS, LINK_PERIOD_MS, 0U, TASK_STACK_WORDS);
+  rt_register(TAG_HEALTH, (TaskHandle_t)healthTaskHandle, "health", HEALTH_PERIOD_MS, HEALTH_PERIOD_MS, 0U, 256U);
   /* USER CODE END RTOS_THREADS */
 
   /* USER CODE BEGIN RTOS_EVENTS */
@@ -1365,7 +1507,7 @@ static void MX_USART1_UART_Init(void)
 
   /* USER CODE END USART1_Init 1 */
   huart1.Instance = USART1;
-  huart1.Init.BaudRate = 921600;
+  huart1.Init.BaudRate = 2000000;
   huart1.Init.WordLength = UART_WORDLENGTH_8B;
   huart1.Init.StopBits = UART_STOPBITS_1;
   huart1.Init.Parity = UART_PARITY_NONE;
@@ -1565,11 +1707,13 @@ void StartHealthTask(void *argument)
   for (;;)
   {
     vTaskDelayUntil(&lastWake, period);
+    rt_job_begin(TAG_HEALTH, rt_release_from_tick(lastWake));
     g_health.heapFree        = xPortGetFreeHeapSize();
     g_health.stackFreeA      = uxTaskGetStackHighWaterMark(hTaskA);
     g_health.stackFreeB      = uxTaskGetStackHighWaterMark(hTaskB);
     g_health.stackFreeHealth = uxTaskGetStackHighWaterMark(NULL);
     g_health.checks++;
+    rt_job_end(TAG_HEALTH);
   }
   /* USER CODE END 5 */
 }

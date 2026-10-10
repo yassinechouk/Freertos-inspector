@@ -168,6 +168,18 @@ standard names. */
 
 /* USER CODE BEGIN Defines */
 /* Section where parameter definitions can be added (for instance, to override default ones in FreeRTOS.h) */
+
+/* RTOS doctor instrumentation (Core/Src/rtos_trace.c). The trace macros expand inside
+   tasks.c, where pxCurrentTCB is visible; each task carries its tag in pxTaskTag. */
+#define configUSE_APPLICATION_TASK_TAG          1
+#define INCLUDE_xTaskGetIdleTaskHandle          1
+#define INCLUDE_xTimerGetTimerDaemonTaskHandle  1
+#if defined(__ICCARM__) || defined(__CC_ARM) || defined(__GNUC__)
+void rt_switched_in(void *tag);
+void rt_tick(uint32_t tickBeforeIncrement);
+#endif
+#define traceTASK_SWITCHED_IN()          rt_switched_in((void *)pxCurrentTCB->pxTaskTag)
+#define traceTASK_INCREMENT_TICK(xTick)  rt_tick((uint32_t)(xTick))
 /* USER CODE END Defines */
 
 #endif /* FREERTOS_CONFIG_H */

@@ -26,9 +26,23 @@ extern "C" {
 /* STM32 -> supervisor */
 #define HIL_T_HEARTBEAT   0x01u     /* u32 uptime_ms, u8 fault, u8 mode (also supervisor -> STM32) */
 #define HIL_T_TELEMETRY   0x02u     /* u32 t_ms, i16 sp_rpm10, i16 rpm10, u16 duty_permille, u8 fault, u8 mode */
-#define HIL_T_TASK_TABLE  0x10u     /* reserved: static task configuration */
-#define HIL_T_TASK_STATS  0x11u     /* reserved: per-task statistics */
-#define HIL_T_TRACE       0x12u     /* reserved: context-switch trace */
+/* RTOS layer. Times are CPU cycles (f_cpu given in TASK_TABLE and RTOS_SYS). */
+#define HIL_T_TASK_TABLE  0x10u     /* static configuration of one task, sent every few seconds:
+                                       u8 tag, u8 priority, u16 period_ms (0 = sporadic), u16 deadline_ms (0 = none),
+                                       u32 wcet_cycles (declared C, 0 = unknown), u16 stack_words, u32 f_cpu_hz,
+                                       name: the rest of the payload (ASCII, no terminator) */
+#define HIL_T_TASK_STATS  0x11u     /* measurements of one task, once per second:
+                                       u8 tag, u16 cpu_permille (last second), u16 jobs (last second),
+                                       u32 c_max, u32 c_avg, u32 r_max, u32 r_min (cycles, since reset),
+                                       u16 deadline_misses (since reset), u16 stack_free_words */
+#define HIL_T_TRACE       0x12u     /* continuous trace, a burst of events:
+                                       u32 t0 (cycles), u16 dropped (events lost so far, wraps),
+                                       then N x { u8 id, u24 delta } with delta in cycles from the previous
+                                       event (the first one from t0). Event ids: HIL_TR_* below */
+#define HIL_T_RTOS_SYS    0x13u     /* once per second: u32 f_cpu_hz, u32 switches (last second),
+                                       u32 trace_events (last second), u32 trace_dropped (total),
+                                       u16 idle_permille, u16 tick_hz,
+                                       u32 ctx_switch_max, u32 isr_to_task_max (cycles, measured since reset) */
 #define HIL_T_EVENT       0x20u     /* u32 t_ms, u8 code, i32 arg */
 #define HIL_T_ACK         0x82u     /* u8 acked_type, u8 status, i16 value */
 /* supervisor -> STM32 */
@@ -51,6 +65,13 @@ extern "C" {
 #define HIL_EVT_SP_TIMEOUT     6u   /* arg = 0: REMOTE setpoint not refreshed for 1 s, setpoint -> 0.
                                        The operator must resend the setpoint at least every second:
                                        a supervisor that is merely alive does not keep the motor running. */
+
+/* ---- Trace event ids (HIL_T_TRACE) --------------------------------------- */
+#define HIL_TR_TASK_MAX   0x3Fu     /* 0x00..0x3F: task with this tag switched in (0 = untagged task) */
+#define HIL_TR_ISR_IN     0x40u     /* 0x40 | isr: interrupt handler entered */
+#define HIL_TR_ISR_OUT    0x80u     /* 0x80 | isr: interrupt handler left */
+#define HIL_TR_TICK       0xC0u     /* RTOS tick (instant) */
+#define HIL_ISR_ADC_DMA   1u        /* ADC DMA half/full transfer: wakes the acquisition task */
 
 /* ---- ACK status ---------------------------------------------------------- */
 #define HIL_ACK_OK        0u
