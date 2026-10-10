@@ -108,6 +108,16 @@ typedef struct
   float    settleMs;            /* time after which the speed stays within 2 % */
   float    finalRpm;            /* mean over the last 32 samples               */
 } CtlRec_t;
+
+/* Supervisor link (USART1, TX by DMA). Observe-only: nothing received from the
+   supervisor ever reaches the control loop. */
+typedef struct
+{
+  uint32_t sent;                /* lines handed to the DMA                     */
+  uint32_t busy;                /* previous line still on the wire: skipped    */
+  uint32_t timeouts;            /* DMA transfer-complete not seen in time      */
+  uint32_t errors;              /* UART error callbacks                        */
+} LinkStats_t;
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -159,6 +169,12 @@ _Static_assert(ENC_WIN == sizeof(((EncStats_t *)0)->winD) / sizeof(int32_t),
 _Static_assert(REC_LEN == sizeof(((CtlRec_t *)0)->sp) / sizeof(int16_t),
                "CtlRec_t arrays must have REC_LEN entries");
 
+/* Supervisor link: one text line every LINK_PERIOD_MS, sent by DMA from a task
+   below every control task. About 40 bytes = 3.5 ms on the wire at 115200. */
+#define LINK_PERIOD_MS        100U
+#define LINK_PRIORITY         10U   /* above the health task, below all control tasks */
+#define LINK_BUF_LEN          64U
+
 /* Fail-stop self-test, run from the acquisition task 5 s after start.
    0 = off (reference build), 1 = call the CSS callback, 2 = call Error_Handler,
    3 = software NMI (goes through NMI_Handler).
@@ -178,6 +194,9 @@ DMA_HandleTypeDef hdma_adc1;
 TIM_HandleTypeDef htim1;
 TIM_HandleTypeDef htim2;
 TIM_HandleTypeDef htim3;
+
+UART_HandleTypeDef huart1;
+DMA_HandleTypeDef hdma_usart1_tx;
 
 /* Definitions for healthTask */
 osThreadId_t healthTaskHandle;
@@ -213,6 +232,11 @@ static StaticTask_t acq_TCB;
 static StackType_t  acq_Stack[TASK_STACK_WORDS];
 static TaskHandle_t hAcq = NULL;
 
+static StaticTask_t link_TCB;
+static StackType_t  link_Stack[TASK_STACK_WORDS];
+static TaskHandle_t hLink = NULL;
+static uint8_t      linkBuf[LINK_BUF_LEN];   /* read by the DMA during a transfer */
+
 /* Globals (not static) so they are easy to watch in Live Expressions */
 volatile HealthStatus_t g_health;
 volatile CycleStats_t   g_ctxSwitch = { .min = UINT32_MAX };
@@ -225,6 +249,7 @@ volatile uint32_t       g_isrT0;      /* timestamp written by the DMA ISR */
 volatile EncStats_t     g_enc = { .warmup = 10U, .dmin = INT32_MAX, .dmax = INT32_MIN };
 volatile CtlState_t     g_ctl;
 volatile CtlRec_t       g_rec;
+volatile LinkStats_t    g_link;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -235,6 +260,7 @@ static void MX_ADC1_Init(void);
 static void MX_TIM3_Init(void);
 static void MX_TIM1_Init(void);
 static void MX_TIM2_Init(void);
+static void MX_USART1_UART_Init(void);
 void StartHealthTask(void *argument);
 
 /* USER CODE BEGIN PFP */
@@ -461,6 +487,67 @@ static void ctl_update(uint32_t ms)
   }
 }
 
+/* Text formatting by hand: no printf/snprintf from a task (project rule). */
+static char *put_str(char *p, const char *s)
+{
+  while (*s != '\0') { *p++ = *s++; }
+  return p;
+}
+
+static char *put_i32(char *p, int32_t v)
+{
+  char tmp[11];
+  uint32_t n = 0U;
+  uint32_t u;
+
+  if (v < 0) { *p++ = '-'; u = (uint32_t)(-(v + 1)) + 1U; }
+  else       { u = (uint32_t)v; }
+
+  do { tmp[n++] = (char)('0' + (u % 10U)); u /= 10U; } while (u != 0U);
+  while (n > 0U) { *p++ = tmp[--n]; }
+  return p;
+}
+
+/* "t=<ms> sp=<rpm> rpm10=<0.1 rpm> duty=<per mille>\r\n" */
+static uint32_t link_format(uint8_t *buf)
+{
+  char *p = (char *)buf;
+  p = put_str(p, "t=");      p = put_i32(p, (int32_t)g_acq.blocks);
+  p = put_str(p, " sp=");    p = put_i32(p, (int32_t)g_ctl.spRpm);
+  p = put_str(p, " rpm10="); p = put_i32(p, g_enc.rpm10);
+  p = put_str(p, " duty=");  p = put_i32(p, (int32_t)(g_ctl.duty * 1000.0f));
+  p = put_str(p, "\r\n");
+  return (uint32_t)((uint8_t *)p - buf);
+}
+
+/* Lowest-priority real-time job: it may be late, it must never delay control. */
+static void LinkTask(void *arg)
+{
+  (void)arg;
+  const TickType_t period = pdMS_TO_TICKS(LINK_PERIOD_MS);
+  TickType_t lastWake = xTaskGetTickCount();
+
+  for (;;)
+  {
+    vTaskDelayUntil(&lastWake, period);
+
+    (void)ulTaskNotifyTake(pdTRUE, 0U);                 /* drop a stale completion */
+    const uint32_t n = link_format(linkBuf);
+    if (HAL_UART_Transmit_DMA(&huart1, linkBuf, (uint16_t)n) == HAL_OK)
+    {
+      g_link.sent++;
+      if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(20U)) == 0U)
+      {
+        g_link.timeouts++;
+      }
+    }
+    else
+    {
+      g_link.busy++;
+    }
+  }
+}
+
 /* Acquisition task: woken by the DMA half/full-transfer interrupt.
    It starts the hardware itself, so that no interrupt can ever try to
    notify a task that does not exist yet. */
@@ -595,6 +682,7 @@ int main(void)
   MX_TIM3_Init();
   MX_TIM1_Init();
   MX_TIM2_Init();
+  MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
   dwt_init();
 
@@ -648,6 +736,10 @@ int main(void)
   hAcq = xTaskCreateStatic(AcqTask, "acq", TASK_STACK_WORDS, NULL,
                            ACQ_PRIORITY, acq_Stack, &acq_TCB);
   configASSERT(hAcq != NULL);
+
+  hLink = xTaskCreateStatic(LinkTask, "link", TASK_STACK_WORDS, NULL,
+                            LINK_PRIORITY, link_Stack, &link_TCB);
+  configASSERT(hLink != NULL);
   /* USER CODE END RTOS_THREADS */
 
   /* USER CODE BEGIN RTOS_EVENTS */
@@ -965,6 +1057,41 @@ static void MX_TIM3_Init(void)
 }
 
 /**
+  * @brief USART1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_USART1_UART_Init(void)
+{
+
+  /* USER CODE BEGIN USART1_Init 0 */
+
+  /* USER CODE END USART1_Init 0 */
+
+  /* USER CODE BEGIN USART1_Init 1 */
+
+  /* USER CODE END USART1_Init 1 */
+  huart1.Instance = USART1;
+  huart1.Init.BaudRate = 115200;
+  huart1.Init.WordLength = UART_WORDLENGTH_8B;
+  huart1.Init.StopBits = UART_STOPBITS_1;
+  huart1.Init.Parity = UART_PARITY_NONE;
+  huart1.Init.Mode = UART_MODE_TX_RX;
+  huart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart1.Init.OverSampling = UART_OVERSAMPLING_16;
+  huart1.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
+  huart1.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
+  if (HAL_UART_Init(&huart1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN USART1_Init 2 */
+
+  /* USER CODE END USART1_Init 2 */
+
+}
+
+/**
   * Enable DMA controller clock
   */
 static void MX_DMA_Init(void)
@@ -977,6 +1104,9 @@ static void MX_DMA_Init(void)
   /* DMA1_Channel1_IRQn interrupt configuration */
   HAL_NVIC_SetPriority(DMA1_Channel1_IRQn, 6, 0);
   HAL_NVIC_EnableIRQ(DMA1_Channel1_IRQn);
+  /* DMA1_Channel4_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Channel4_IRQn, 7, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Channel4_IRQn);
 
 }
 
@@ -1076,6 +1206,25 @@ void HAL_ADC_ErrorCallback(ADC_HandleTypeDef *hadc)
   if ((hadc->Instance == ADC1) && ((hadc->ErrorCode & HAL_ADC_ERROR_OVR) != 0U))
   {
     g_acq.overruns++;
+  }
+}
+
+/* USART1 DMA transfer complete (interrupt priority 7, FromISR APIs allowed). */
+void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
+{
+  if ((huart->Instance == USART1) && (hLink != NULL))
+  {
+    BaseType_t woken = pdFALSE;
+    vTaskNotifyGiveFromISR(hLink, &woken);
+    portYIELD_FROM_ISR(woken);
+  }
+}
+
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
+{
+  if (huart->Instance == USART1)
+  {
+    g_link.errors++;
   }
 }
 
