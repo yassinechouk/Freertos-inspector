@@ -84,9 +84,19 @@ static void start_quadrature(void)
 }
 
 /* Regle la frequence de chaque voie. Sous la frequence minimale (ou a 0),
-   le codeur est arrete. Rien n'est ecrit si la periode n'a pas change. */
+   le codeur est arrete. Rien n'est ecrit si la periode n'a pas change.
+
+   Tramage : la periode est un nombre entier de ticks, donc la frequence ne
+   peut prendre que les valeurs RES/n (a 12,5 kHz : pas de 0,125 %). Pour que la
+   frequence MOYENNE soit celle demandee, on alterne a chaque appel (1 ms) entre
+   n et n+1 ticks, dans la proportion qui donne la bonne moyenne (accumulateur
+   d'erreur, comme un modulateur sigma-delta du premier ordre). L'ecart entre
+   n et n+1 est de 1 tick (100 ns) : les comparateurs bougent d'au plus 1 tick,
+   meme si un front tombe entre deux ecritures. */
 static void set_encoder_freq(float f_hz)
 {
+    static float s_acc;                       /* erreur de frequence accumulee */
+
     if (f_hz < (float)RES_HZ / TICKS_MAX) {
         if (s_enc_running) {
             ESP_ERROR_CHECK(mcpwm_timer_start_stop(s_enc_timer, MCPWM_TIMER_STOP_EMPTY));
@@ -94,8 +104,17 @@ static void set_encoder_freq(float f_hz)
         }
         return;
     }
-    uint32_t ticks = (uint32_t)((float)RES_HZ / f_hz + 0.5f);
-    if (ticks < TICKS_MIN) { ticks = TICKS_MIN; }
+    const uint32_t n = (uint32_t)((float)RES_HZ / f_hz);   /* periode entiere juste au-dessus de f */
+    uint32_t ticks;
+    if (n < TICKS_MIN) {
+        ticks = TICKS_MIN;
+    } else {
+        const float f_hi = (float)RES_HZ / (float)n;         /* frequence avec n ticks   */
+        const float f_lo = (float)RES_HZ / (float)(n + 1U);  /* frequence avec n+1 ticks */
+        s_acc += (f_hz - f_lo) / (f_hi - f_lo);              /* part du temps passee a n */
+        if (s_acc >= 1.0f) { s_acc -= 1.0f; ticks = n; }
+        else               { ticks = n + 1U; }
+    }
     if (ticks != s_ticks) {
         ESP_ERROR_CHECK(mcpwm_timer_set_period(s_enc_timer, ticks));
         ESP_ERROR_CHECK(mcpwm_comparator_set_compare_value(s_cA,  ticks / 2));
