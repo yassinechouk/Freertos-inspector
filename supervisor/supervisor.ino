@@ -228,7 +228,7 @@ void loop()
   pollLink();
   pollConsole();
 
-  if (cmdPending && (now - cmdSentMs) > 500) {
+  if (cmdPending && (millis() - cmdSentMs) > 500) {      /* millis(), not "now": cmdSentMs is set later in this pass */
     cmdPending = false;
     Serial.println("[CMD] no ACK from the STM32 within 500 ms (command lost, or not received)");
   }
