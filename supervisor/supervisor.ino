@@ -218,6 +218,15 @@ static void updateLed()
   else                                                setLedColor(ELYSSA_GREEN);
 }
 
+/* Called by net.cpp during its blocking waits (scan, join): without it the Serial1
+   buffer overflows and frames from the STM32 are lost while Wi-Fi starts. */
+void net_idle()
+{
+  link_poll();
+  const uint32_t now = millis();
+  if (now - lastHbMs >= HEARTBEAT_MS) { lastHbMs = now; link_send_heartbeat(); }
+}
+
 void setup()
 {
   Serial.begin(115200);

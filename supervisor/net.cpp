@@ -10,6 +10,9 @@ static const uint32_t JOIN_MS     = 15000;
 static const uint32_t FORGET_MS   = 3000;              /* BOOT held this long: forget the network */
 static const int      BOOT_BUTTON_PIN = 0;          /* BOOT_PIN is already a core macro */
 
+/* Implemented by the sketch: keeps the STM32 link serviced while Wi-Fi blocks. */
+void net_idle();
+
 static DNSServer dns;
 static bool      portal;
 static String    options;
@@ -30,7 +33,9 @@ static String htmlEscape(const String &s)
 static void buildOptions()
 {
   options = "";
-  const int n = WiFi.scanNetworks();
+  WiFi.scanNetworks(true);                             /* asynchronous: the link keeps running */
+  int n;
+  while ((n = WiFi.scanComplete()) == WIFI_SCAN_RUNNING) { net_idle(); delay(5); }
   for (int i = 0; i < n; i++) {
     const String ssid = WiFi.SSID(i);
     if (ssid.length() == 0) continue;
@@ -58,7 +63,8 @@ bool net_begin()
     WiFi.begin(ssid.c_str(), pass.c_str());
     const uint32_t t0 = millis();
     while (WiFi.status() != WL_CONNECTED && millis() - t0 < JOIN_MS) {
-      delay(250);
+      net_idle();
+      delay(5);
     }
     if (WiFi.status() == WL_CONNECTED) {
       MDNS.begin(HOSTNAME);
