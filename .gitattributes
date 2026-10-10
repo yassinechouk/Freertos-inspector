@@ -1,0 +1,3 @@
+# Third-party minified files and the generated asset header: keep their bytes exactly (no CRLF conversion)
+supervisor/web/vendor/** -text
+supervisor/assets.h -text
