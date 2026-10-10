@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>HIL bench</title>
+<link rel="stylesheet" href="/uPlot.min.css">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header>
+  <h1>HIL motor bench</h1>
+  <span id="pws" class="pill">browser: connecting</span>
+  <span id="pstm" class="pill">STM32: ?</span>
+  <span id="pmode" class="pill">mode: ?</span>
+  <span id="pfault" class="pill">fault: ?</span>
+  <nav>
+    <button class="tab on" data-tab="live">Live</button>
+    <button class="tab" data-tab="rtos">RTOS</button>
+    <button class="tab" data-tab="events">Events</button>
+  </nav>
+</header>
+
+<main id="live" class="view on">
+  <section class="card motor">
+    <h2>Motor</h2>
+    <div id="motor3d"><p id="motor3dmsg" class="note">loading 3D view ...</p></div>
+    <div class="big">
+      <div><small>setpoint</small><span id="vsp">-</span><small>rpm</small></div>
+      <div><small>speed</small><span id="vrpm">-</span><small>rpm</small></div>
+      <div><small>duty</small><span id="vduty">-</span><small>%</small></div>
+    </div>
+    <p class="note" id="slowmo"></p>
+  </section>
+
+  <section class="card controls">
+    <h2>Control</h2>
+    <div class="modes">
+      <button data-m="idle">IDLE</button><button data-m="local">LOCAL</button>
+      <button data-m="remote">REMOTE</button><button data-m="test">TEST</button>
+    </div>
+    <div class="row"><span>0</span><b><span id="spv">0</span> rpm</b><span>3000</span></div>
+    <input id="sp" type="range" min="0" max="3000" step="10" value="0">
+    <button class="stop" id="stop">STOP (0 rpm)</button>
+    <p class="note">REMOTE: this page resends the setpoint 5 times per second; if it closes or the Wi-Fi drops,
+      the STM32 brings the motor back to 0 within 1 s. TEST: step-response square wave.</p>
+  </section>
+
+  <section class="card health">
+    <h2>Health</h2>
+    <ul class="ind">
+      <li><i id="hws"></i>browser link <b id="tws">-</b></li>
+      <li><i id="hstm"></i>STM32 link <b id="tstm">-</b></li>
+      <li><i id="hcrc"></i>CRC errors <b id="tcrc">-</b></li>
+      <li><i id="hlost"></i>frames lost <b id="tlost">-</b></li>
+      <li><i id="hwifi"></i>Wi-Fi signal <b id="twifi">-</b></li>
+      <li><i id="hfault"></i>motor fault <b id="tfault">-</b></li>
+      <li><i id="hheap"></i>supervisor memory <b id="theap">-</b></li>
+    </ul>
+    <p class="note" id="addr"></p>
+  </section>
+
+  <section class="card wide">
+    <h2>Speed (last 10 s)</h2>
+    <div id="chartSpeed" class="chart"></div>
+  </section>
+  <section class="card wide">
+    <h2>Duty cycle</h2>
+    <div id="chartDuty" class="chart small"></div>
+  </section>
+</main>
+
+<main id="rtos" class="view">
+  <section class="card wide">
+    <h2>RTOS layer</h2>
+    <p>Arrives in step 3b: configured tasks (priority, period, deadline, stack), measured execution times and
+      CPU load, context-switch timeline (Gantt), and a schedulability analysis computed here from the
+      measurements, with what-if editing.</p>
+  </section>
+</main>
+
+<main id="events" class="view">
+  <section class="card wide">
+    <h2>Events</h2>
+    <ul id="log"></ul>
+  </section>
+</main>
+
+<script src="/uPlot.iife.min.js"></script>
+<script type="module" src="/app.js"></script>
+</body>
+</html>

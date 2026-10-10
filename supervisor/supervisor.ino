@@ -1,7 +1,7 @@
 /* Supervisor node (Elyssa, ESP32-S3) - step 2: STM32 link + Wi-Fi + web dashboard.
 
    Modules (same folder): link.* (STM32 frames), net.* (Wi-Fi, setup portal),
-   web.* (HTTP server, WebSocket), dashboard.h (page), hil_proto.h (copy, see tools/sync_proto.ps1).
+   web.* (HTTP server, WebSocket), web/ (dashboard sources; embedded into assets.h by tools/embed_assets.py), hil_proto.h (copy, see tools/sync_proto.ps1).
 
    Wi-Fi: the first time (or after "wifi reset", or a 3 s press on BOOT), Elyssa opens the
    Wi-Fi network "Elyssa-Setup": connect to it, a page lists the networks, choose yours.
