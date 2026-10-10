@@ -11,7 +11,7 @@ RTOS Doctor has four parts: a **probe** inside the FreeRTOS application, a **fra
 │   ▲ trace macros (FreeRTOSConfig) │ ───────► │ trace → absolute cycles    │ ──────► │ model: analysis,     │
 │ rtos_probe: discovery, jobs,      │ frames   │ JSON stats, binary trace   │  WS     │   health, alerts     │
 │   detectors, trace ring           │ ◄─────── │ commands, dead-man refresh │ ◄────── │ 8 views, sessions    │
-│ LinkTask (priority 10, every 10ms)│ commands │ setup portal, mDNS         │         │                      │
+│ LinkTask (priority 17, every 10ms)│ commands │ setup portal, mDNS         │         │                      │
 └───────────────────────────────────┘          └────────────────────────────┘         └──────────────────────┘
 ```
 

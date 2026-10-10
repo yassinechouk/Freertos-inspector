@@ -212,7 +212,8 @@ _Static_assert(REC_LEN == sizeof(((CtlRec_t *)0)->sp) / sizeof(int16_t),
    heartbeat every LINK_HEARTBEAT_DIV cycles), sent by DMA from a task below every
    control task. RX is a circular DMA buffer polled by the same task. */
 #define LINK_PERIOD_MS        10U
-#define LINK_PRIORITY         10U   /* above the health task, below all control tasks */
+#define LINK_PRIORITY         17U   /* 10 ms period: above taskB (25 ms), rate-monotonic; below the
+                                       control loop (and labCtl, so a CPU hog also delays it). Was 10: 6 % margin */
 #define LINK_STACK_WORDS      384U  /* 256 measured 75 % used (trace frame buffer on the stack) */
 #define LINK_BUF_LEN          1280U
 #define LINK_RX_LEN           256U
@@ -974,7 +975,7 @@ static uint32_t link_add_probe_events(uint32_t n)
   return n;
 }
 
-/* Lowest-priority real-time job: it may be late, it must never delay control.
+/* Supervisor link: below the control loop, so it can never delay control.
    It blocks at one place only (vTaskDelayUntil): one job per period for the probe.
    Two TX buffers: one is built while the other may still be on the wire. */
 static void LinkTask(void *arg)
