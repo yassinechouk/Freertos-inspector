@@ -91,6 +91,8 @@ typedef struct
   float    duty;                /* output, 0..1                                */
   uint32_t ticks;               /* control steps since start                   */
   uint32_t saturated;           /* steps where the output was clamped          */
+  uint32_t stallMs;             /* consecutive ms of "driven hard, not moving" */
+  uint32_t fault;               /* 0 = none, latched until reset (CTL_FAULT_*) */
 } CtlState_t;
 
 /* One-shot recording of the first setpoint step: 1 sample per ms. Results are
@@ -166,6 +168,17 @@ _Static_assert(ENC_WIN == sizeof(((EncStats_t *)0)->winD) / sizeof(int32_t),
 #define CTL_HOLD_MS           1000U     /* setpoint 0 after reset: safe start */
 #define CTL_HALF_PERIOD_MS    2000U     /* 2 s at the setpoint, 2 s at 0      */
 #define REC_LEN               512U
+
+/* Stall / encoder-loss protection: if the output is held at or above
+   CTL_STALL_DUTY while the measured speed stays within +-CTL_STALL_RPM for
+   CTL_STALL_MS, the motor is not following (blocked shaft, broken encoder
+   wire, dead plant). The motor output is then forced off (Safe_State) and the
+   fault is latched until reset. A healthy start leaves 30 rpm in a few ms. */
+#define CTL_STALL_DUTY        0.8f
+#define CTL_STALL_RPM         30.0f
+#define CTL_STALL_MS          500U
+#define CTL_FAULT_NONE        0U
+#define CTL_FAULT_STALL       1U
 _Static_assert(REC_LEN == sizeof(((CtlRec_t *)0)->sp) / sizeof(int16_t),
                "CtlRec_t arrays must have REC_LEN entries");
 
@@ -442,6 +455,15 @@ static void ctl_update(uint32_t ms)
   const float rpm = (float)g_enc.rpm10 * 0.1f;
   float u = 0.0f;
 
+  if (g_ctl.fault != CTL_FAULT_NONE)         /* latched: output already forced off */
+  {
+    g_ctl.spRpm = sp;
+    g_ctl.rpm   = rpm;
+    g_ctl.duty  = 0.0f;
+    g_ctl.ticks++;
+    return;
+  }
+
   if (g_enc.winN == ENC_WIN)                 /* speed estimate fully valid */
   {
     const float e    = sp - rpm;
@@ -463,6 +485,24 @@ static void ctl_update(uint32_t ms)
   else
   {
     g_ctl.integ = 0.0f;                      /* no valid measurement: output stays 0 */
+  }
+
+  /* Stall detection on the measured speed (valid only once the estimate is full). */
+  if ((g_enc.winN == ENC_WIN) && (u >= CTL_STALL_DUTY) &&
+      (rpm < CTL_STALL_RPM) && (rpm > -CTL_STALL_RPM))
+  {
+    g_ctl.stallMs++;
+  }
+  else
+  {
+    g_ctl.stallMs = 0U;
+  }
+
+  if (g_ctl.stallMs >= CTL_STALL_MS)
+  {
+    g_ctl.fault = CTL_FAULT_STALL;
+    Safe_State();                            /* MOE off, PA9 low, LD2 on: no reset of the CPU */
+    u = 0.0f;
   }
 
   const uint32_t cmp = (uint32_t)(u * (float)(__HAL_TIM_GET_AUTORELOAD(&htim1) + 1U));
@@ -508,7 +548,7 @@ static char *put_i32(char *p, int32_t v)
   return p;
 }
 
-/* "t=<ms> sp=<rpm> rpm10=<0.1 rpm> duty=<per mille>\r\n" */
+/* "t=<ms> sp=<rpm> rpm10=<0.1 rpm> duty=<per mille> fault=<code>\r\n" */
 static uint32_t link_format(uint8_t *buf)
 {
   char *p = (char *)buf;
@@ -516,6 +556,7 @@ static uint32_t link_format(uint8_t *buf)
   p = put_str(p, " sp=");    p = put_i32(p, (int32_t)g_ctl.spRpm);
   p = put_str(p, " rpm10="); p = put_i32(p, g_enc.rpm10);
   p = put_str(p, " duty=");  p = put_i32(p, (int32_t)(g_ctl.duty * 1000.0f));
+  p = put_str(p, " fault="); p = put_i32(p, (int32_t)g_ctl.fault);
   p = put_str(p, "\r\n");
   return (uint32_t)((uint8_t *)p - buf);
 }
