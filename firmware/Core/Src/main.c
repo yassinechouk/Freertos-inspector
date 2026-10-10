@@ -164,7 +164,8 @@ typedef struct
 /* Context-switch measurement: a low-priority sender notifies a
    high-priority receiver; the receiver measures the delay with DWT. */
 #define CTX_RX_PRIORITY       24U   /* highest: wakes immediately           */
-#define CTX_TX_PRIORITY       12U   /* below A and B                        */
+#define CTX_TX_PRIORITY       21U   /* 5 ms period: above A (10 ms) and B (25 ms), rate-monotonic.
+                                       Was 12: RTOS Doctor measured ~40 misses/s, R = 7.7 ms > T = 5 ms */
 #define CTX_TX_PERIOD_MS      5U
 
 /* Setpoint acquisition: TIM3 (10 kHz) -> ADC1 -> circular DMA, 2 x 10 samples.
@@ -212,6 +213,7 @@ _Static_assert(REC_LEN == sizeof(((CtlRec_t *)0)->sp) / sizeof(int16_t),
    control task. RX is a circular DMA buffer polled by the same task. */
 #define LINK_PERIOD_MS        10U
 #define LINK_PRIORITY         10U   /* above the health task, below all control tasks */
+#define LINK_STACK_WORDS      384U  /* 256 measured 75 % used (trace frame buffer on the stack) */
 #define LINK_BUF_LEN          1280U
 #define LINK_RX_LEN           256U
 #define LINK_HEARTBEAT_DIV    10U
@@ -283,7 +285,7 @@ static StackType_t  acq_Stack[TASK_STACK_WORDS];
 static TaskHandle_t hAcq = NULL;
 
 static StaticTask_t link_TCB;
-static StackType_t  link_Stack[TASK_STACK_WORDS];
+static StackType_t  link_Stack[LINK_STACK_WORDS];
 static TaskHandle_t hLink = NULL;
 static uint8_t      linkBuf[2][LINK_BUF_LEN]; /* one is built while the DMA sends the other */
 static uint8_t     *txBuf = linkBuf[0];
@@ -392,7 +394,7 @@ static void CtxRxTask(void *arg)
   }
 }
 
-/* Sender: low priority, timestamps then notifies the receiver.
+/* Sender: lower priority than the receiver, timestamps then notifies it.
    The receiver preempts it immediately, so dt covers:
    notify call + PendSV + context save/restore + return from NotifyTake. */
 static void CtxTxTask(void *arg)
@@ -1221,7 +1223,7 @@ int main(void)
                            ACQ_PRIORITY, acq_Stack, &acq_TCB);
   configASSERT(hAcq != NULL);
 
-  hLink = xTaskCreateStatic(LinkTask, "link", TASK_STACK_WORDS, NULL,
+  hLink = xTaskCreateStatic(LinkTask, "link", LINK_STACK_WORDS, NULL,
                             LINK_PRIORITY, link_Stack, &link_TCB);
   configASSERT(hLink != NULL);
 
