@@ -16,6 +16,15 @@ early phases are in [MEASUREMENTS.md](MEASUREMENTS.md#key-findings-so-far).
 4. **A job ends when the task blocks.** Telling "blocked" from "preempted" at switch-out is a read-only check
    of the ready list; it made the probe generic (no code in the tasks) instead of relying on markers.
 5. **The tool must prove its detectors.** Each detector has a fault in the fault lab that triggers it.
+   The first bench run also tested the detectors themselves: "starved" fired every second for a task
+   that runs a few microseconds once per second (0 per mille, and ready at the instant of the check).
+   The rule became "released more than 1 s ago and never given the CPU since".
+6. **A late periodic task merges its jobs.** After a 150 ms CPU hog, `vTaskDelayUntil()` returns without
+   blocking until the task has caught up: six periods of taskB ran as one job, C = 28 ms instead of
+   4.9 ms, and the analysis built on "worst C since reset" announced 197 % utilisation. The probe now
+   also reports the worst of the last second, and the analysis uses the last 10 s.
+7. **heap_4 reads 0 free bytes before the first allocation.** With static allocation only, the free list
+   is never initialised: the dashboard showed an empty heap, and the heap-pressure fault allocated nothing.
 
 ## Signals and control
 
@@ -38,5 +47,11 @@ early phases are in [MEASUREMENTS.md](MEASUREMENTS.md#key-findings-so-far).
     EN and BOOT; an open monitor stopped the plant, and the stall protection rightly cut the motor.
 12. **The toolchain is part of the system.** Windows Smart App Control silently blocked the unsigned ESP-IDF
     archiver; the build moved to Docker, and the old binary kept being flashed until the cause was found.
-13. **Flag stale data.** A Live Expressions view showing statistics accumulated before the plant was running
+14. **A peripheral can die silently after an error.** A framing error (most likely the supervisor's boot
+    ROM log at 115200 baud arriving on a 2 Mbaud receiver) made the HAL abort the UART DMA reception
+    but left the DMA channel BUSY; every restart attempt then failed, and the target stopped hearing
+    commands while still sending telemetry. Seen live on the bench: a register dump over SWD
+    (`RxState` READY, DMA state BUSY, `CR3.DMAR` 0, `ISR.FE` 1) gave the cause in a minute. The receiver
+    now resets both sides and restarts on error or after 2 s of silence.
+15. **Flag stale data.** A Live Expressions view showing statistics accumulated before the plant was running
     looked like a broken encoder. Worst cases "since reset" need a reset before a test.
