@@ -8,7 +8,7 @@
    Then open http://elyssa.local (or the address printed below) on a computer of that network.
 
    USB console (115200, line ending NL or NL+CR):
-     mode idle|local|remote|test     sp <rpm>     stat     wifi reset
+     mode idle|local|remote|test     sp <rpm>     stat     wifi reset     wifi set <ssid> <password>
 
    Safety: the STM32 decides (clamps, ramps, refuses). In REMOTE the setpoint must be refreshed:
    the browser resends it every 200 ms; Elyssa forwards it only while the browser is fresh, so a
@@ -122,9 +122,18 @@ static void printStats()
                 net_rssi(), web_clients());
 }
 
-/* Case-insensitive; "mode test" and "test" both work; "sp 800" and "sp=800" too. */
+/* Case-insensitive; "mode test" and "test" both work; "sp 800" and "sp=800" too.
+   "wifi set <ssid> <password>" is handled first, before lowercasing (SSID and password
+   are case-sensitive; no spaces in either). The password is never printed. */
 static void handleConsoleLine(char *line)
 {
+  if (!strncasecmp(line, "wifi set ", 9)) {
+    char ssid[33] = {0}, pass[65] = {0};
+    if (sscanf(line + 9, "%32s %64s", ssid, pass) >= 1) net_save_and_restart(ssid, pass);
+    else Serial.println("usage: wifi set <ssid> <password>");
+    return;
+  }
+
   for (char *c = line; *c != '\0'; c++) {
     if (*c >= 'A' && *c <= 'Z') *c = (char)(*c + 32);
     if (*c == '=') *c = ' ';
@@ -144,7 +153,7 @@ static void handleConsoleLine(char *line)
   else if (!strncmp(p, "remote", 6)) commandMode(HIL_MODE_REMOTE);
   else if (!strncmp(p, "test", 4))   commandMode(HIL_MODE_TEST);
   else if (!strncmp(p, "sp", 2) && sscanf(p + 2, "%f", &v) == 1) commandSetpoint(v, SRC_CONSOLE);
-  else Serial.println("commands: mode idle|local|remote|test, sp <rpm>, stat, wifi reset");
+  else Serial.println("commands: mode idle|local|remote|test, sp <rpm>, stat, wifi reset, wifi set <ssid> <password>");
 }
 
 static void pollConsole()
@@ -234,7 +243,7 @@ void setup()
   link_begin();
   const bool station = net_begin();
   web_begin(!station);
-  Serial.println("supervisor ready. commands: mode idle|local|remote|test, sp <rpm>, stat, wifi reset");
+  Serial.println("supervisor ready. commands: mode idle|local|remote|test, sp <rpm>, stat, wifi reset, wifi set <ssid> <password>");
 }
 
 void loop()
