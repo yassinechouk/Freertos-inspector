@@ -1,7 +1,7 @@
 // Overview: the answer to "is everything fine?" in one screen, then where to look.
 import { S, sortedTasks, color, escapeHtml } from './store.js';
 import { analyse, health, verdict } from './model.js';
-import { alerts } from './alerts.js';
+import { alerts, titleOf } from './alerts.js';
 
 const $ = id => document.getElementById(id);
 const CATS = [
@@ -51,6 +51,6 @@ export function render() {
 
   const recent = alerts.filter(x => x.sev !== 'info').slice(-6).reverse();
   $('ov-alerts').innerHTML = recent.length ? recent.map(x => `
-    <li class="${x.sev}"><b>${escapeHtml(x.title)}</b><small>${new Date(x.at).toLocaleTimeString()}</small></li>`).join('')
+    <li class="${x.sev}"><b>${escapeHtml(titleOf(x))}</b><small>${new Date(x.at).toLocaleTimeString()}${x.count > 1 ? ' · ×' + x.count : ''}</small></li>`).join('')
     : '<li class="ok"><b>No warning so far.</b></li>';
 }

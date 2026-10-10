@@ -84,7 +84,7 @@
         <th>C (µs)</th><th>R computed</th><th>R measured</th><th>margin</th><th>verdict</th></tr></thead>
       <tbody id="an-body"></tbody>
     </table></div>
-    <p class="note">Values come from the measurements (worst C since reset, mean period). Edit priority, period or C to
+    <p class="note">Values come from the measurements (worst C of the last 10 s, mean period; the Tasks view keeps the worst since reset). Edit priority, period or C to
       ask "what if": only this page recomputes, the target is not changed. Equal priorities are counted as interference
       (time slicing), and each preemption costs one measured context switch.</p>
   </section>
@@ -142,6 +142,7 @@
     <input id="mo-sp" type="range" min="0" max="3000" step="10" value="0">
     <button class="stop" id="mo-stop">STOP (0 rpm)</button>
     <p class="note">Motor fault: <b id="mo-fault">–</b></p>
+    <p class="cmdnote" id="mo-cmd" aria-live="polite"></p>
     <p class="note">This application is the workload that RTOS Doctor observes: a 1 kHz PI speed loop on the STM32,
       a DC motor model on an ESP32 closing the loop with real PWM and encoder signals. In REMOTE, this page resends the
       setpoint 5 times per second; if it closes, the target brings the motor back to 0 within 1 s.</p>

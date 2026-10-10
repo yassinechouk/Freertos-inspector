@@ -36,6 +36,14 @@ export function init(ctx) {
   setInterval(() => { if (S.motor.mode === 'REMOTE' && S.source === 'live') send({ cmd: 'sp', value: +$('mo-sp').value }); }, 200);   // operator keep-alive
   addEventListener('resize', resize);
 
+  // Command feedback: the target acknowledges every command; the gateway says when it does not.
+  bus.addEventListener('note', ev => {
+    const m = ev.detail, el = $('mo-cmd');
+    if (!el || (m.type === 'ack' && m.cmd === 'sp' && m.status === 'ok')) return;   // setpoint refresh: 5 per second, not shown
+    if (m.type === 'ack') { el.className = 'cmdnote ' + (m.status === 'ok' ? 'ok' : 'warn'); el.textContent = `Target: ${m.cmd} ${m.status === 'ok' ? 'accepted' : m.status} (${m.value})`; }
+    else if (/no ACK/.test(m.text)) { el.className = 'cmdnote bad'; el.textContent = 'The target did not answer: the command did not reach it (link from the supervisor to the target).'; }
+  });
+
   bus.addEventListener('telemetry', ev => {
     const m = ev.detail;
     for (const [t, sp, rpm, duty] of m.s) { T.push(t / 1000); SP.push(sp); RPM.push(rpm); DUTY.push(duty); }

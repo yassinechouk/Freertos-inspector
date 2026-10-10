@@ -23,7 +23,8 @@ function send(o) {
 
 function connect() {
   if (location.protocol === 'file:') return;
-  ws = new WebSocket(`ws://${location.host}/ws`);
+  // ?ws=<host> talks to a gateway while the page is served from elsewhere (development).
+  ws = new WebSocket(`ws://${new URLSearchParams(location.search).get('ws') || location.host}/ws`);
   ws.binaryType = 'arraybuffer';
   ws.onopen = () => { S.connected = true; header(); };
   ws.onclose = () => { S.connected = false; header(); setTimeout(connect, 1500); };

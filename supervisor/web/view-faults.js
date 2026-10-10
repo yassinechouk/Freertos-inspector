@@ -6,7 +6,7 @@ import { bus } from './store.js';
 const $ = id => document.getElementById(id);
 
 const FAULTS = [
-  { key: 'hog', title: 'CPU hog', expect: ['CPU_HOG', 'DEADLINE_MISS'],
+  { key: 'hog', title: 'CPU hog', expect: ['CPU_HOG'],
     what: 'A task at priority 18 runs 150 ms without ever blocking.',
     learn: 'Every lower-priority task (taskB, the link, the health task…) waits: their response times jump and deadlines are missed. In the Timeline, one long bar and everyone below it waiting.' },
   { key: 'stack', title: 'Stack pressure', expect: ['STACK_LOW'],
@@ -47,7 +47,20 @@ export function init(ctx) {
   bus.addEventListener('alert', ev => {
     const a = ev.detail;
     if (!a) return;
-    for (const [k, r] of runs) if (Date.now() - r.at < 8000) r.seen.add(a.code);
+    for (const [k, r] of runs) {
+      if (Date.now() - r.at >= 8000 || r.doneAt) continue;
+      r.seen.add(a.code);
+      const f = FAULTS.find(x => x.key === k);
+      if (f.expect.every(e => r.seen.has(e))) r.doneAt = Date.now();      // time of the detection, not of the display
+    }
+    render();
+  });
+  // Did the target receive the command? (ACK from the target, or "no ACK" from the gateway)
+  bus.addEventListener('note', ev => {
+    const m = ev.detail, last = [...runs.entries()].sort((x, y) => y[1].at - x[1].at)[0];
+    if (!last || Date.now() - last[1].at > 2000) return;
+    if (m.type === 'ack' && m.cmd === 'fault') last[1].ack = m.status;
+    else if (m.type === 'info' && /no ACK/.test(m.text)) last[1].ack = 'none';
     render();
   });
 }
@@ -60,8 +73,14 @@ export function render() {
     const age = (Date.now() - r.at) / 1000;
     const got = f.expect.filter(e => r.seen.has(e));
     const all = got.length === f.expect.length;
+    if (r.ack === 'none' || (r.ack && r.ack !== 'ok')) {
+      box.className = 'result bad';
+      box.innerHTML = r.ack === 'none' ? 'The target did not acknowledge the command: it never received it (link from the supervisor to the target).'
+        : `The target refused the command (${escapeHtml(r.ack)}).`;
+      continue;
+    }
     box.className = 'result ' + (all ? 'ok' : age > 8 ? 'bad' : 'wait');
-    box.innerHTML = all ? `Detected: ${got.join(' + ')} (${age.toFixed(1)} s after injection)`
+    box.innerHTML = all ? `Detected: ${got.join(' + ')} (${(((r.doneAt ?? Date.now()) - r.at) / 1000).toFixed(1)} s after injection)`
       : age > 8 ? `Not detected within 8 s${got.length ? ` (only ${got.join(', ')})` : ''}`
       : `Waiting for the detectors… ${got.length ? 'seen: ' + got.join(', ') : ''}`;
   }

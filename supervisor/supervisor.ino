@@ -125,12 +125,14 @@ void on_task_stats(const uint8_t *p, uint8_t len)
   snprintf(j, sizeof j,
            "{\"type\":\"tstat\",\"tag\":%u,\"state\":%u,\"prio\":%u,\"cpu\":%u,\"jobs\":%u,"
            "\"cmax\":%lu,\"cavg\":%lu,\"rmax\":%lu,\"rmin\":%lu,\"tavg\":%lu,\"tmin\":%lu,\"tmax\":%lu,"
-           "\"miss\":%u,\"stack\":%u}",
+           "\"miss\":%u,\"stack\":%u,\"cmaxl\":%lu,\"rmaxl\":%lu}",
            p[0], p[1], p[2], hil_get_u16(p + 4), hil_get_u16(p + 6),
            (unsigned long)hil_get_u32(p + 8), (unsigned long)hil_get_u32(p + 12),
            (unsigned long)hil_get_u32(p + 16), (unsigned long)hil_get_u32(p + 20),
            (unsigned long)hil_get_u32(p + 24), (unsigned long)hil_get_u32(p + 28),
-           (unsigned long)hil_get_u32(p + 32), hil_get_u16(p + 36), hil_get_u16(p + 38));
+           (unsigned long)hil_get_u32(p + 32), hil_get_u16(p + 36), hil_get_u16(p + 38),
+           (unsigned long)(len >= 48 ? hil_get_u32(p + 40) : hil_get_u32(p + 8)),
+           (unsigned long)(len >= 48 ? hil_get_u32(p + 44) : hil_get_u32(p + 16)));
   web_broadcast(j);
 }
 

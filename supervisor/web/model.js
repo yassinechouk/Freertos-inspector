@@ -3,8 +3,13 @@
 import { S } from './store.js';
 import { responseTimes, utilisation, llBound, rmViolations } from './analysis-core.js';
 
+/* Worst value of the last N seconds of a per-second history (0 if none). */
+const recentMax = (a, n = 10) => Math.max(0, ...(a || []).slice(-n));
+
 /* Periodic or sporadic tasks with a measured release interval. All times in CPU cycles.
-   C = the what-if value if set, else the worst measured C. D = explicit deadline, else the
+   C = the what-if value if set, else the worst C measured in the last 10 s. Not the worst since
+   reset: after an overload, a task that vTaskDelayUntil() lets catch up runs several periods in
+   one job, and that one job would dominate the analysis for ever. D = explicit deadline, else the
    measured mean period (implicit deadline). */
 export function buildModel() {
   const list = [];
@@ -12,14 +17,15 @@ export function buildModel() {
     if (!t.cfg || !t.st || (t.cfg.flags & 1)) continue;          // idle: no jobs
     if (t.what.exclude) continue;
     const T = t.what.period != null ? t.what.period / 1000 * S.fcpu : t.st.tavg;
-    if (!T || !t.st.cmax) continue;                               // period or C not known yet
+    const Cmeas = recentMax(t.hist.cmax) || t.st.cmax;
+    if (!T || !Cmeas) continue;                                   // period or C not known yet
     const D = t.cfg.deadline ? t.cfg.deadline / 1000 * S.fcpu : T;
     list.push({
       id: tag, name: t.cfg.name,
       prio: t.what.prio ?? t.cfg.prio,
       T, D,
-      C: t.what.c != null ? t.what.c / 1e6 * S.fcpu : t.st.cmax,
-      Rmeas: t.st.rmax, Cavg: t.st.cavg, misses: t.st.miss,
+      C: t.what.c != null ? t.what.c / 1e6 * S.fcpu : Cmeas,
+      Rmeas: recentMax(t.hist.rmax) || t.st.rmax, Cavg: t.st.cavg, misses: t.st.miss,
     });
   }
   return list;
@@ -102,10 +108,13 @@ export function health(a = analyse()) {
   // Observation chain: probe cost, trace losses, link quality
   if (!S.sys) h.probe = { s: 'off', text: 'waiting' };
   else {
-    const p = S.sys.probe / 10, lost = S.sys.drop + S.traceDropGw;
-    const crc = S.gw ? S.gw.crc : 0;
+    // losses and CRC errors of the last 10 s (counters are cumulative: compare with 10 s ago)
+    const L = S.lossHist, now = L[L.length - 1], old = L[Math.max(0, L.length - 11)];
+    const lost = now && old ? Math.max(0, now.drop - old.drop) : 0;
+    const crc = now && old ? Math.max(0, now.crc - old.crc) : 0;
+    const p = S.sys.probe / 10;
     h.probe = { s: p > 5 ? 'bad' : (p > 2 || lost > 0 || crc > 0) ? 'warn' : 'ok',
-      text: `probe ${p.toFixed(1)} % CPU, ${lost} trace events lost, ${crc} CRC errors` };
+      text: `probe ${p.toFixed(1)} % CPU; last 10 s: ${lost} trace events lost, ${crc} CRC errors` };
   }
   return h;
 }

@@ -12,6 +12,7 @@ export const S = {
   events: [],            // raw events from the target, newest last
   trace: [],             // [cycles (unwrapped), id]
   traceDropStm: 0, traceDropGw: 0,
+  lossHist: [],          // once per second: cumulative trace losses and CRC errors (for "last 10 s")
   isrMaxCyc: 0,
   connected: false,      // browser <-> supervisor
   source: 'live',        // 'live' | 'replay'
@@ -23,14 +24,14 @@ const emit = (name, detail) => bus.dispatchEvent(new CustomEvent(name, { detail 
 export function reset() {
   S.tasks.clear(); S.queues.clear();
   S.sys = null; S.gw = null; S.tel = []; S.events = []; S.trace = [];
-  S.traceDropStm = 0; S.traceDropGw = 0; S.isrMaxCyc = 0;
+  S.traceDropStm = 0; S.traceDropGw = 0; S.isrMaxCyc = 0; S.lossHist = [];
   lastRaw = null; wraps = 0;
   emit('update');
 }
 
 function task(tag) {
   let t = S.tasks.get(tag);
-  if (!t) { t = { cfg: null, st: null, prevMiss: null, hist: { cpu: [], miss: [] }, what: {} }; S.tasks.set(tag, t); }
+  if (!t) { t = { cfg: null, st: null, prevMiss: null, hist: { cpu: [], miss: [], cmax: [], rmax: [] }, what: {} }; S.tasks.set(tag, t); }
   return t;
 }
 
@@ -51,6 +52,8 @@ export function ingest(m) {
       t.st = m;
       push(t.hist.cpu, m.cpu / 10);
       push(t.hist.miss, newMiss);
+      push(t.hist.cmax, m.cmaxl ?? m.cmax);       // older sessions: only the since-reset maximum
+      push(t.hist.rmax, m.rmaxl ?? m.rmax);
       break;
     }
     case 'qstat': {
@@ -61,6 +64,7 @@ export function ingest(m) {
     case 'rsys':
       S.sys = m;
       if (m.fcpu) S.fcpu = m.fcpu;
+      push(S.lossHist, { t: Date.now(), drop: m.drop + S.traceDropGw, crc: S.gw ? S.gw.crc : 0 });
       break;
     case 'sys':
       S.gw = m;

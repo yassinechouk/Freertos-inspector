@@ -1,6 +1,6 @@
 // Alerts: the journal, newest first, with an explanation for each entry.
 import { escapeHtml } from './store.js';
-import { alerts, clearAlerts } from './alerts.js';
+import { alerts, clearAlerts, titleOf, repeatOf } from './alerts.js';
 
 const $ = id => document.getElementById(id);
 let filter = 'all';
@@ -23,7 +23,7 @@ export function render() {
   $('al-list').innerHTML = list.map(a => `
     <li class="${a.sev}">
       <div><span class="sev">${a.sev === 'bad' ? 'problem' : a.sev === 'warn' ? 'warning' : 'info'}</span>
-        <b>${escapeHtml(a.title)}</b><small>${new Date(a.at).toLocaleTimeString()}${a.tMs != null ? ` · target t = ${(a.tMs / 1000).toFixed(3)} s` : ''}</small></div>
+        <b>${escapeHtml(titleOf(a))}</b><small>${new Date(a.at).toLocaleTimeString()}${a.tMs != null ? ` · target t = ${(a.tMs / 1000).toFixed(3)} s` : ''}${a.count > 1 ? ` · <b class="rep">${escapeHtml(repeatOf(a))}</b>` : ''}</small></div>
       ${a.why ? `<p>${escapeHtml(a.why)}</p>` : ''}
     </li>`).join('') || '<li class="ok"><div><b>Nothing to report.</b></div></li>';
 }
