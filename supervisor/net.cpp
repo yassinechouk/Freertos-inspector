@@ -6,7 +6,7 @@
 
 static const char    *AP_NAME     = "Elyssa-Setup";
 static const char    *HOSTNAME    = "elyssa";          /* http://elyssa.local */
-static const uint32_t JOIN_MS     = 15000;
+static const uint32_t JOIN_MS     = 30000;
 static const uint32_t FORGET_MS   = 3000;              /* BOOT held this long: forget the network */
 static const int      BOOT_BUTTON_PIN = 0;          /* BOOT_PIN is already a core macro */
 
@@ -57,6 +57,14 @@ bool net_begin()
 
   if (ssid.length() > 0) {
     Serial.printf("[WIFI] joining \"%s\" ...\n", ssid.c_str());
+    static uint8_t lastReason;                          /* Wi-Fi disconnect reason (802.11 / ESP codes) */
+    WiFi.onEvent([](WiFiEvent_t, WiFiEventInfo_t info) {
+      lastReason = info.wifi_sta_disconnected.reason;
+      Serial.printf("[WIFI]   disconnected, reason %u\n", lastReason);
+    }, ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
+    WiFi.onEvent([](WiFiEvent_t, WiFiEventInfo_t info) {
+      Serial.printf("[WIFI]   associated (channel %u), waiting for an address (DHCP)\n", info.wifi_sta_connected.channel);
+    }, ARDUINO_EVENT_WIFI_STA_CONNECTED);
     WiFi.mode(WIFI_STA);
     WiFi.setHostname(HOSTNAME);
     WiFi.setAutoReconnect(true);
@@ -74,7 +82,15 @@ bool net_begin()
       portal = false;
       return true;
     }
-    Serial.println("[WIFI] could not join the saved network: opening the setup portal");
+    /* Common reasons: 15 / 204 = 4-way handshake failed (wrong password), 201 = no AP found,
+       202 = authentication failed, 2 = auth expired (signal too weak for our 11 dBm), 203 = assoc failed. */
+    const char *why = lastReason == 15 || lastReason == 204 ? "wrong password" :
+                      lastReason == 201                     ? "network not found" :
+                      lastReason == 202                     ? "authentication failed" :
+                      lastReason == 2                       ? "authentication expired: signal too weak?" :
+                      lastReason == 203                     ? "association failed" : "see reason code";
+    Serial.printf("[WIFI] could not join the saved network (status %d, reason %u: %s): opening the setup portal\n",
+                  (int)WiFi.status(), lastReason, why);
   } else {
     Serial.println("[WIFI] no network saved: opening the setup portal");
   }
