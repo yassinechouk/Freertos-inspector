@@ -169,17 +169,41 @@ standard names. */
 /* USER CODE BEGIN Defines */
 /* Section where parameter definitions can be added (for instance, to override default ones in FreeRTOS.h) */
 
-/* RTOS doctor instrumentation (Core/Src/rtos_trace.c). The trace macros expand inside
-   tasks.c, where pxCurrentTCB is visible; each task carries its tag in pxTaskTag. */
-#define configUSE_APPLICATION_TASK_TAG          1
+/* RTOS Doctor probe (Core/Src/rtos_probe.c). These macros expand inside tasks.c and queue.c,
+   where the kernel structures are visible: they READ fields and pass plain values to the probe,
+   and write only pxTaskTag (owned by the probe). Nothing in the application's tasks changes. */
+#define configUSE_APPLICATION_TASK_TAG          1   /* pxTaskTag = probe tag */
+#define configRECORD_STACK_HIGH_ADDRESS         1   /* pxEndOfStack: stack size at creation */
 #define INCLUDE_xTaskGetIdleTaskHandle          1
-#define INCLUDE_xTimerGetTimerDaemonTaskHandle  1
 #if defined(__ICCARM__) || defined(__CC_ARM) || defined(__GNUC__)
-void rt_switched_in(void *tag);
-void rt_tick(uint32_t tickBeforeIncrement);
+#include "rtos_probe_hooks.h"
 #endif
-#define traceTASK_SWITCHED_IN()          rt_switched_in((void *)pxCurrentTCB->pxTaskTag)
-#define traceTASK_INCREMENT_TICK(xTick)  rt_tick((uint32_t)(xTick))
+/* Discovery: tag, name, priority and stack size of every task, idle and timer tasks included. */
+#define traceTASK_CREATE(pxNewTCB) \
+  ((pxNewTCB)->pxTaskTag = (TaskHookFunction_t)(uintptr_t)rtp_on_create((pxNewTCB)->pcTaskName, \
+    (uint32_t)(pxNewTCB)->uxPriority, (uint32_t)((pxNewTCB)->pxEndOfStack - (pxNewTCB)->pxStack + 1), (void *)(pxNewTCB)))
+/* Release: the task enters a ready list. */
+#define traceMOVED_TASK_TO_READY_STATE(pxTCB) \
+  rtp_on_ready((uint32_t)(uintptr_t)(pxTCB)->pxTaskTag)
+#define traceTASK_SWITCHED_IN() \
+  rtp_on_switch_in((uint32_t)(uintptr_t)pxCurrentTCB->pxTaskTag)
+/* Leaving the CPU: still in its ready list = preempted; elsewhere = blocked or suspended (end of job).
+   Read-only check, at the start of vTaskSwitchContext. */
+#define traceTASK_SWITCHED_OUT() \
+  rtp_on_switch_out((uint32_t)(uintptr_t)pxCurrentTCB->pxTaskTag, \
+    (uint32_t)(listLIST_ITEM_CONTAINER(&(pxCurrentTCB->xStateListItem)) != &(pxReadyTasksLists[pxCurrentTCB->uxPriority])))
+#define traceTASK_INCREMENT_TICK(xTick)  rtp_on_tick((uint32_t)(xTick))
+/* Mutex priority inheritance (priority inversion bounded by the kernel). */
+#define traceTASK_PRIORITY_INHERIT(pxTCB, uxPrio) \
+  rtp_on_inherit((uint32_t)(uintptr_t)(pxTCB)->pxTaskTag, (uint32_t)(uxPrio), (uint32_t)(uintptr_t)pxCurrentTCB->pxTaskTag)
+#define traceTASK_PRIORITY_DISINHERIT(pxTCB, uxPrio) \
+  rtp_on_disinherit((uint32_t)(uintptr_t)(pxTCB)->pxTaskTag, (uint32_t)(uxPrio))
+/* Registered queues (rtp_queue_register sets uxQueueNumber; 0 = not tracked). */
+#define traceQUEUE_SEND(pxQueue) \
+  rtp_on_queue_send((uint32_t)(pxQueue)->uxQueueNumber, (uint32_t)(pxQueue)->uxMessagesWaiting + 1U, (uint32_t)(pxQueue)->uxLength)
+#define traceQUEUE_SEND_FROM_ISR(pxQueue)          traceQUEUE_SEND(pxQueue)
+#define traceQUEUE_SEND_FAILED(pxQueue)            rtp_on_queue_full((uint32_t)(pxQueue)->uxQueueNumber)
+#define traceQUEUE_SEND_FROM_ISR_FAILED(pxQueue)   rtp_on_queue_full((uint32_t)(pxQueue)->uxQueueNumber)
 /* USER CODE END Defines */
 
 #endif /* FREERTOS_CONFIG_H */

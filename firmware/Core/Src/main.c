@@ -25,8 +25,8 @@
 #include "FreeRTOS.h"
 #include "task.h"
 #include "hil_proto.h"
-#include "timers.h"
-#include "rtos_trace.h"
+#include "rtos_probe.h"
+#include "faultlab.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -211,23 +211,14 @@ _Static_assert(REC_LEN == sizeof(((CtlRec_t *)0)->sp) / sizeof(int16_t),
    control task. RX is a circular DMA buffer polled by the same task. */
 #define LINK_PERIOD_MS        10U
 #define LINK_PRIORITY         10U   /* above the health task, below all control tasks */
-#define LINK_BUF_LEN          1024U
+#define LINK_BUF_LEN          1280U
 #define LINK_RX_LEN           256U
 #define LINK_HEARTBEAT_DIV    10U
 #define LINK_DEADMAN_MS       1000U /* REMOTE: no frame for this long -> setpoint ramps to 0 */
 #define LINK_MAX_EVENTS       2U    /* events per TX cycle, to bound the buffer */
 #define LINK_TRACE_MAX_EVENTS 180U  /* trace events per TX cycle (6 frames); the rest waits in the ring */
 
-/* RTOS doctor: task tags (rtos_trace.h), declared once here with each task's timing. */
-#define TAG_ACQ               1U
-#define TAG_CTXRX             2U
-#define TAG_TASKA             3U
-#define TAG_TASKB             4U
-#define TAG_CTXTX             5U
-#define TAG_LINK              6U
-#define TAG_HEALTH            7U
-#define TAG_IDLE              8U
-#define TAG_TIMER             9U
+#define LINK_PROBE_EVENTS     4U    /* probe events per TX cycle */
 #define CTL_DEFAULT_MODE      HIL_MODE_IDLE   /* HIL_MODE_TEST for a bench without supervisor */
 #define CTL_RPM_MAX           3000.0f
 #define CTL_SLEW_RPM_PER_MS   3.0f          /* 3000 rpm/s on LOCAL and REMOTE setpoints */
@@ -293,7 +284,8 @@ static TaskHandle_t hAcq = NULL;
 static StaticTask_t link_TCB;
 static StackType_t  link_Stack[TASK_STACK_WORDS];
 static TaskHandle_t hLink = NULL;
-static uint8_t      linkBuf[LINK_BUF_LEN];   /* read by the DMA during a transfer */
+static uint8_t      linkBuf[2][LINK_BUF_LEN]; /* one is built while the DMA sends the other */
+static uint8_t     *txBuf = linkBuf[0];
 static uint8_t      rxBuf[LINK_RX_LEN];      /* written by the DMA (circular)    */
 static uint32_t     rxRd;                    /* read index into rxBuf            */
 static hil_parser_t rxParser;
@@ -356,11 +348,9 @@ static void TaskA(void *arg)
   for (;;)
   {
     vTaskDelayUntil(&lastWake, period);
-    rt_job_begin(TAG_TASKA, rt_release_from_tick(lastWake));
     HAL_GPIO_WritePin(TP_TASK_A_GPIO_Port, TP_TASK_A_Pin, GPIO_PIN_SET);
     busy_work_us(TASK_A_WORK_US);
     HAL_GPIO_WritePin(TP_TASK_A_GPIO_Port, TP_TASK_A_Pin, GPIO_PIN_RESET);
-    rt_job_end(TAG_TASKA);
   }
 }
 
@@ -373,11 +363,9 @@ static void TaskB(void *arg)
   for (;;)
   {
     vTaskDelayUntil(&lastWake, period);
-    rt_job_begin(TAG_TASKB, rt_release_from_tick(lastWake));
     HAL_GPIO_WritePin(TP_TASK_B_GPIO_Port, TP_TASK_B_Pin, GPIO_PIN_SET);
     busy_work_us(TASK_B_WORK_US);
     HAL_GPIO_WritePin(TP_TASK_B_GPIO_Port, TP_TASK_B_Pin, GPIO_PIN_RESET);
-    rt_job_end(TAG_TASKB);
   }
 }
 
@@ -398,10 +386,8 @@ static void CtxRxTask(void *arg)
   for (;;)
   {
     (void)ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-    rt_job_begin(TAG_CTXRX, g_ctxT0);
     const uint32_t dt = DWT->CYCCNT - g_ctxT0;
     stats_add(&g_ctxSwitch, dt);
-    rt_job_end(TAG_CTXRX);
   }
 }
 
@@ -417,10 +403,8 @@ static void CtxTxTask(void *arg)
   for (;;)
   {
     vTaskDelayUntil(&lastWake, period);
-    rt_job_begin(TAG_CTXTX, rt_release_from_tick(lastWake));
     g_ctxT0 = DWT->CYCCNT;
     xTaskNotifyGive(hCtxRx);
-    rt_job_end(TAG_CTXTX);
   }
 }
 
@@ -632,7 +616,7 @@ static int16_t sat_i16(float v)
 
 static uint32_t link_add(uint32_t n, uint8_t type, const uint8_t *payload, uint8_t len)
 {
-  return n + (uint32_t)hil_encode(&linkBuf[n], type, txSeq++, payload, len);
+  return n + (uint32_t)hil_encode(&txBuf[n], type, txSeq++, payload, len);
 }
 
 static uint32_t link_add_telemetry(uint32_t n)
@@ -763,6 +747,16 @@ static void link_handle_frame(const hil_frame_t *f)
       link_event(HIL_EVT_CMD_REJECTED, f->type);
       break;
 
+    case HIL_T_CMD_FAULT:
+      if ((f->len == 1U) && (faultlab_inject(f->payload[0]) == 0))
+      {
+        ack_push(HIL_T_CMD_FAULT, HIL_ACK_OK, (int16_t)f->payload[0]);
+        break;
+      }
+      g_link.cmdRejected++;
+      ack_push(HIL_T_CMD_FAULT, HIL_ACK_REJECTED, (int16_t)((f->len == 1U) ? f->payload[0] : 0U));
+      break;
+
     default:
       g_link.cmdRejected++;
       link_event(HIL_EVT_CMD_REJECTED, f->type);
@@ -822,16 +816,16 @@ static void link_supervise(void)
   }
 }
 
-/* ---- RTOS layer frames (rtos_trace.h, HIL_T_TASK_* / HIL_T_TRACE / HIL_T_RTOS_SYS) ---- */
+/* ---- RTOS Doctor frames (rtos_probe.h -> hil_proto.h HIL_T_TASK_* / TRACE / RTOS_SYS / QUEUE) ---- */
 
 static uint32_t trCycTmp[LINK_TRACE_MAX_EVENTS];
 static uint8_t  trIdTmp[LINK_TRACE_MAX_EVENTS];
 
-/* Drains the trace ring into TRACE frames: t0, then (id, 24-bit delta) per event. */
+/* Drains the probe trace into TRACE frames: t0, then (id, 24-bit delta) per event. */
 static uint32_t link_add_trace(uint32_t n)
 {
-  const uint32_t k = rt_trace_read(trCycTmp, trIdTmp, LINK_TRACE_MAX_EVENTS);
-  const uint16_t dropped = (uint16_t)rt_trace_dropped();
+  const uint32_t k = rtp_trace_read(trCycTmp, trIdTmp, LINK_TRACE_MAX_EVENTS);
+  const uint16_t dropped = (uint16_t)rtp_trace_dropped();
   uint32_t i = 0U;
   while (i < k)
   {
@@ -859,72 +853,110 @@ static uint32_t link_add_trace(uint32_t n)
 
 static uint32_t link_add_task_table(uint32_t n, uint8_t tag)
 {
-  RtTaskInfo_t ti;
-  if (rt_task_info(tag, &ti) == 0) { return n; }
-  uint8_t pl[32];
+  RtpTaskInfo_t ti;
+  if (rtp_task_info(tag, &ti) == 0) { return n; }
+  uint8_t pl[40];
   pl[0] = tag;
-  pl[1] = ti.priority;
-  hil_put_u16(&pl[2], ti.periodMs);
+  pl[1] = ti.basePrio;
+  hil_put_u16(&pl[2], ti.stackWords);
   hil_put_u16(&pl[4], ti.deadlineMs);
-  hil_put_u32(&pl[6], ti.wcetCycles);
-  hil_put_u16(&pl[10], ti.stackWords);
-  hil_put_u32(&pl[12], SystemCoreClock);
-  uint32_t len = 16U;
+  pl[6] = ti.flags;
+  pl[7] = 0U;
+  hil_put_u32(&pl[8], SystemCoreClock);
+  uint32_t len = 12U;
   for (const char *c = ti.name; (*c != '\0') && (len < sizeof pl); c++) { pl[len++] = (uint8_t)*c; }
   return link_add(n, HIL_T_TASK_TABLE, pl, (uint8_t)len);
 }
 
 static uint32_t link_add_task_stats(uint32_t n, uint8_t tag)
 {
-  RtTaskInfo_t ti;
-  if (rt_task_info(tag, &ti) == 0) { return n; }
-  RtTaskStats_t st;
-  rt_task_stats(tag, &st);
-  uint8_t pl[25];
+  RtpTaskInfo_t ti;
+  if (rtp_task_info(tag, &ti) == 0) { return n; }
+  RtpTaskStats_t st;
+  rtp_task_stats(tag, &st);
+  uint8_t pl[40];
   pl[0] = tag;
-  hil_put_u16(&pl[1], st.cpuPermille);
-  hil_put_u16(&pl[3], st.jobs);
-  hil_put_u32(&pl[5], st.cMax);
-  hil_put_u32(&pl[9], st.cAvg);
-  hil_put_u32(&pl[13], st.rMax);
-  hil_put_u32(&pl[17], st.rMin);
-  hil_put_u16(&pl[21], st.misses);
-  hil_put_u16(&pl[23], st.stackFree);
+  pl[1] = st.state;
+  pl[2] = st.prio;
+  pl[3] = 0U;
+  hil_put_u16(&pl[4], st.cpuPermille);
+  hil_put_u16(&pl[6], st.jobs);
+  hil_put_u32(&pl[8], st.cMax);
+  hil_put_u32(&pl[12], st.cAvg);
+  hil_put_u32(&pl[16], st.rMax);
+  hil_put_u32(&pl[20], st.rMin);
+  hil_put_u32(&pl[24], st.tAvg);
+  hil_put_u32(&pl[28], st.tMin);
+  hil_put_u32(&pl[32], st.tMax);
+  hil_put_u16(&pl[36], st.misses);
+  hil_put_u16(&pl[38], st.stackFree);
   return link_add(n, HIL_T_TASK_STATS, pl, (uint8_t)sizeof pl);
+}
+
+static uint32_t link_add_queue_stats(uint32_t n, uint8_t qid)
+{
+  RtpQueueStats_t qs;
+  if (rtp_queue_stats(qid, &qs) == 0) { return n; }
+  uint8_t pl[32];
+  pl[0] = qid;
+  pl[1] = 0U;
+  hil_put_u16(&pl[2], qs.length);
+  hil_put_u16(&pl[4], qs.waiting);
+  hil_put_u16(&pl[6], qs.maxFill);
+  hil_put_u32(&pl[8], qs.failures);
+  uint32_t len = 12U;
+  for (const char *c = qs.name; (*c != '\0') && (len < sizeof pl); c++) { pl[len++] = (uint8_t)*c; }
+  return link_add(n, HIL_T_QUEUE_STATS, pl, (uint8_t)len);
 }
 
 static uint32_t link_add_rtos_sys(uint32_t n)
 {
-  RtSysStats_t s;
-  RtTaskStats_t idle;
-  rt_sys_stats(&s);
-  rt_task_stats(TAG_IDLE, &idle);
-  uint8_t pl[28];
+  RtpSysStats_t s;
+  rtp_sys_stats(&s);
+  uint8_t pl[44];
   hil_put_u32(&pl[0], SystemCoreClock);
   hil_put_u32(&pl[4], s.switches);
   hil_put_u32(&pl[8], s.events);
   hil_put_u32(&pl[12], s.dropped);
-  hil_put_u16(&pl[16], idle.cpuPermille);
+  hil_put_u16(&pl[16], s.idlePermille);
   hil_put_u16(&pl[18], (uint16_t)configTICK_RATE_HZ);
   hil_put_u32(&pl[20], g_ctxSwitch.max);
   hil_put_u32(&pl[24], g_isrToTask.max);
+  hil_put_u16(&pl[28], s.probePermille);
+  hil_put_u16(&pl[30], s.kernelPermille);
+  hil_put_u32(&pl[32], (uint32_t)configTOTAL_HEAP_SIZE);
+  hil_put_u32(&pl[36], (uint32_t)xPortGetFreeHeapSize());
+  hil_put_u32(&pl[40], (uint32_t)xPortGetMinimumEverFreeHeapSize());
   return link_add(n, HIL_T_RTOS_SYS, pl, (uint8_t)sizeof pl);
 }
 
-/* Lowest-priority real-time job: it may be late, it must never delay control. */
+/* Detector events from the probe (deadline misses, inheritance, queue full, stack/heap low...). */
+static uint32_t link_add_probe_events(uint32_t n)
+{
+  uint32_t tMs;
+  uint8_t  code;
+  int32_t  arg;
+  for (uint32_t k = 0U; (k < LINK_PROBE_EVENTS) && (rtp_event_pop(&tMs, &code, &arg) != 0); k++)
+  {
+    uint8_t pl[9];
+    hil_put_u32(&pl[0], tMs);
+    pl[4] = code;
+    hil_put_u32(&pl[5], (uint32_t)arg);
+    n = link_add(n, HIL_T_EVENT, pl, (uint8_t)sizeof pl);
+  }
+  return n;
+}
+
+/* Lowest-priority real-time job: it may be late, it must never delay control.
+   It blocks at one place only (vTaskDelayUntil): one job per period for the probe.
+   Two TX buffers: one is built while the other may still be on the wire. */
 static void LinkTask(void *arg)
 {
   (void)arg;
   const TickType_t period = pdMS_TO_TICKS(LINK_PERIOD_MS);
   TickType_t lastWake = xTaskGetTickCount();
-  uint32_t hbDiv = 0U;
-  uint32_t cycle = 0U;
-  uint8_t  statTag = 0U;                                     /* next task whose stats are sent (0 = none) */
+  uint32_t hbDiv = 0U, cycle = 0U, statIdx = 0U, sysPending = 0U;
   uint8_t  tableTag = 1U;
-
-  /* The idle and timer tasks exist only once the scheduler runs: tag them here. */
-  rt_register(TAG_IDLE, xTaskGetIdleTaskHandle(), "idle", 0U, 0U, 0U, configMINIMAL_STACK_SIZE);
-  rt_register(TAG_TIMER, xTimerGetTimerDaemonTaskHandle(), "timers", 0U, 0U, 0U, configTIMER_TASK_STACK_DEPTH);
 
   hil_parser_init(&rxParser);
   hil_seq_init(&rxSeq);
@@ -934,38 +966,43 @@ static void LinkTask(void *arg)
   for (;;)
   {
     vTaskDelayUntil(&lastWake, period);
-    rt_job_begin(TAG_LINK, rt_release_from_tick(lastWake));
 
     link_rx_poll();
     link_supervise();
+
+    /* Once per second: the probe closes its window and runs its detectors, then the
+       statistics follow, one task (then one queue) per cycle. */
+    cycle++;
+    if ((cycle % 100U) == 0U) { rtp_second(); sysPending = 1U; statIdx = 1U; }
+
+    if (huart1.gState != HAL_UART_STATE_READY) { g_link.busy++; continue; }   /* previous burst still sent */
+    txBuf = linkBuf[cycle & 1U];
 
     uint32_t n = link_add_telemetry(0U);
     if (++hbDiv >= LINK_HEARTBEAT_DIV) { hbDiv = 0U; n = link_add_heartbeat(n); }
     n = link_add_acks(n);
     n = link_add_events(n);
-
-    /* RTOS layer: statistics once per second (one task per cycle), configuration of one
-       task every 200 ms (the whole table every few seconds), trace every cycle. */
-    cycle++;
-    if ((cycle % 100U) == 0U) { rt_second(); n = link_add_rtos_sys(n); statTag = 1U; }
-    if ((statTag != 0U) && (statTag < RT_MAX_TAGS)) { n = link_add_task_stats(n, statTag); statTag++; }
-    if ((cycle % 20U) == 0U) { n = link_add_task_table(n, tableTag); tableTag = (uint8_t)((tableTag % (RT_MAX_TAGS - 1U)) + 1U); }
+    n = link_add_probe_events(n);
+    if (sysPending != 0U) { sysPending = 0U; n = link_add_rtos_sys(n); }
+    if ((statIdx != 0U) && (statIdx < RTP_MAX_TASKS))
+    {
+      n = link_add_task_stats(n, (uint8_t)statIdx);
+      statIdx++;
+    }
+    else if ((statIdx >= RTP_MAX_TASKS) && (statIdx < (RTP_MAX_TASKS + RTP_MAX_QUEUES)))
+    {
+      n = link_add_queue_stats(n, (uint8_t)(statIdx - RTP_MAX_TASKS));
+      statIdx++;
+    }
+    if ((cycle % 20U) == 0U)
+    {
+      n = link_add_task_table(n, tableTag);
+      tableTag = (uint8_t)((tableTag % (RTP_MAX_TASKS - 1U)) + 1U);
+    }
     n = link_add_trace(n);
 
-    (void)ulTaskNotifyTake(pdTRUE, 0U);                 /* drop a stale completion */
-    if (HAL_UART_Transmit_DMA(&huart1, linkBuf, (uint16_t)n) == HAL_OK)
-    {
-      g_link.sent++;
-      if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(8U)) == 0U)
-      {
-        g_link.timeouts++;
-      }
-    }
-    else
-    {
-      g_link.busy++;
-    }
-    rt_job_end(TAG_LINK);
+    if (HAL_UART_Transmit_DMA(&huart1, txBuf, (uint16_t)n) == HAL_OK) { g_link.sent++; }
+    else                                                             { g_link.busy++; }
   }
 }
 
@@ -1010,7 +1047,6 @@ static void AcqTask(void *arg)
   {
     uint32_t bits = 0U;
     (void)xTaskNotifyWait(0U, ACQ_BIT_HALF | ACQ_BIT_FULL, &bits, portMAX_DELAY);
-    rt_job_begin(TAG_ACQ, g_isrT0);                          /* released by the DMA interrupt */
 
     const uint32_t dt = DWT->CYCCNT - g_isrT0;
     if (warmup > 0U)
@@ -1066,7 +1102,6 @@ static void AcqTask(void *arg)
     ctl_update(g_acq.blocks);
 
     HAL_GPIO_WritePin(TP_TASK_C_GPIO_Port, TP_TASK_C_Pin, GPIO_PIN_RESET);
-    rt_job_end(TAG_ACQ);
   }
 }
 /* USER CODE END 0 */
@@ -1108,7 +1143,7 @@ int main(void)
   MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
   dwt_init();
-  rt_init();
+  rtp_init();                    /* before the first task is created */
 
   /* Calibrate the ADC once, while it is still disabled. */
   if (HAL_ADCEx_Calibration_Start(&hadc1, ADC_SINGLE_ENDED) != HAL_OK)
@@ -1165,16 +1200,9 @@ int main(void)
                             LINK_PRIORITY, link_Stack, &link_TCB);
   configASSERT(hLink != NULL);
 
-  /* RTOS doctor: the single declaration of each task's timing (period, deadline, declared C).
-     ctxRx is sporadic: woken by ctxTx, so its minimum inter-arrival time is ctxTx's period. */
-  const uint32_t cyclesPerUs = SystemCoreClock / 1000000U;
-  rt_register(TAG_ACQ,    hAcq,   "acq",    1U, 1U, 0U, TASK_STACK_WORDS);
-  rt_register(TAG_CTXRX,  hCtxRx, "ctxRx",  CTX_TX_PERIOD_MS, 0U, 0U, TASK_STACK_WORDS);
-  rt_register(TAG_TASKA,  hTaskA, "taskA",  TASK_A_PERIOD_MS, TASK_A_PERIOD_MS, TASK_A_WORK_US * cyclesPerUs, TASK_STACK_WORDS);
-  rt_register(TAG_TASKB,  hTaskB, "taskB",  TASK_B_PERIOD_MS, TASK_B_PERIOD_MS, TASK_B_WORK_US * cyclesPerUs, TASK_STACK_WORDS);
-  rt_register(TAG_CTXTX,  hCtxTx, "ctxTx",  CTX_TX_PERIOD_MS, CTX_TX_PERIOD_MS, 0U, TASK_STACK_WORDS);
-  rt_register(TAG_LINK,   hLink,  "link",   LINK_PERIOD_MS, LINK_PERIOD_MS, 0U, TASK_STACK_WORDS);
-  rt_register(TAG_HEALTH, (TaskHandle_t)healthTaskHandle, "health", HEALTH_PERIOD_MS, HEALTH_PERIOD_MS, 0U, 256U);
+  /* Fault lab: demo tasks that inject faults on request (HIL_T_CMD_FAULT). The RTOS Doctor
+     probe needs no registration: every task is discovered when FreeRTOS creates it. */
+  faultlab_init();
   /* USER CODE END RTOS_THREADS */
 
   /* USER CODE BEGIN RTOS_EVENTS */
@@ -1647,17 +1675,6 @@ void HAL_ADC_ErrorCallback(ADC_HandleTypeDef *hadc)
   }
 }
 
-/* USART1 DMA transfer complete (interrupt priority 7, FromISR APIs allowed). */
-void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
-{
-  if ((huart->Instance == USART1) && (hLink != NULL))
-  {
-    BaseType_t woken = pdFALSE;
-    vTaskNotifyGiveFromISR(hLink, &woken);
-    portYIELD_FROM_ISR(woken);
-  }
-}
-
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 {
   if (huart->Instance == USART1)
@@ -1707,13 +1724,11 @@ void StartHealthTask(void *argument)
   for (;;)
   {
     vTaskDelayUntil(&lastWake, period);
-    rt_job_begin(TAG_HEALTH, rt_release_from_tick(lastWake));
     g_health.heapFree        = xPortGetFreeHeapSize();
     g_health.stackFreeA      = uxTaskGetStackHighWaterMark(hTaskA);
     g_health.stackFreeB      = uxTaskGetStackHighWaterMark(hTaskB);
     g_health.stackFreeHealth = uxTaskGetStackHighWaterMark(NULL);
     g_health.checks++;
-    rt_job_end(TAG_HEALTH);
   }
   /* USER CODE END 5 */
 }

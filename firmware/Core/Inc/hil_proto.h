@@ -1,6 +1,6 @@
 /* GENERATED COPY of protocol/hil_proto.h - do not edit; run tools/sync_proto.ps1 */
-/* HIL bench link protocol: STM32 <-> supervisor (Elyssa), UART 921600 8N1.
-   Single source of truth. Copies live in firmware/Core/Inc and supervisor/
+/* RTOS Doctor link protocol: target (STM32 + rtos_probe) <-> supervisor gateway (Elyssa).
+   UART 2 Mbaud 8N1. Single source of truth. Copies live in firmware/Core/Inc and supervisor/
    (see tools/sync_proto.ps1): edit THIS file, then run the script.
 
    Frame (little-endian fields):
@@ -18,44 +18,71 @@
 extern "C" {
 #endif
 
+#define HIL_PROTO_VERSION 2u
 #define HIL_SOF0          0xA5u
 #define HIL_SOF1          0x5Au
 #define HIL_MAX_PAYLOAD   128u
 #define HIL_OVERHEAD      7u        /* SOF0 SOF1 LEN TYPE SEQ CRC_LO CRC_HI */
 
 /* ---- Frame types ------------------------------------------------------- */
-/* STM32 -> supervisor */
-#define HIL_T_HEARTBEAT   0x01u     /* u32 uptime_ms, u8 fault, u8 mode (also supervisor -> STM32) */
+/* target -> supervisor: application (demo motor bench) */
+#define HIL_T_HEARTBEAT   0x01u     /* u32 uptime_ms, u8 fault, u8 mode (also supervisor -> target) */
 #define HIL_T_TELEMETRY   0x02u     /* u32 t_ms, i16 sp_rpm10, i16 rpm10, u16 duty_permille, u8 fault, u8 mode */
-/* RTOS layer. Times are CPU cycles (f_cpu given in TASK_TABLE and RTOS_SYS). */
-#define HIL_T_TASK_TABLE  0x10u     /* static configuration of one task, sent every few seconds:
-                                       u8 tag, u8 priority, u16 period_ms (0 = sporadic), u16 deadline_ms (0 = none),
-                                       u32 wcet_cycles (declared C, 0 = unknown), u16 stack_words, u32 f_cpu_hz,
+
+/* target -> supervisor: RTOS probe. Times are CPU cycles (f_cpu in TASK_TABLE and RTOS_SYS).
+   A "job" (instance) of a task runs from its release (the task becomes ready) to the moment it
+   blocks again; tasks are discovered automatically when FreeRTOS creates them. */
+#define HIL_T_TASK_TABLE  0x10u     /* one task, every few seconds:
+                                       u8 tag, u8 base_priority, u16 stack_words, u16 deadline_ms (0 = automatic:
+                                       the measured period), u8 flags (HIL_TF_*), u8 reserved, u32 f_cpu_hz,
                                        name: the rest of the payload (ASCII, no terminator) */
-#define HIL_T_TASK_STATS  0x11u     /* measurements of one task, once per second:
-                                       u8 tag, u16 cpu_permille (last second), u16 jobs (last second),
-                                       u32 c_max, u32 c_avg, u32 r_max, u32 r_min (cycles, since reset),
-                                       u16 deadline_misses (since reset), u16 stack_free_words */
+#define HIL_T_TASK_STATS  0x11u     /* one task, once per second:
+                                       u8 tag, u8 state (HIL_TS_*), u8 priority (current: may be inherited),
+                                       u8 reserved, u16 cpu_permille (last second), u16 jobs (last second),
+                                       u32 c_max, u32 c_avg, u32 r_max, u32 r_min,
+                                       u32 t_avg, u32 t_min, u32 t_max (release-to-release interval),
+                                       u16 deadline_misses, u16 stack_free_words (all "since reset") */
 #define HIL_T_TRACE       0x12u     /* continuous trace, a burst of events:
                                        u32 t0 (cycles), u16 dropped (events lost so far, wraps),
                                        then N x { u8 id, u24 delta } with delta in cycles from the previous
                                        event (the first one from t0). Event ids: HIL_TR_* below */
 #define HIL_T_RTOS_SYS    0x13u     /* once per second: u32 f_cpu_hz, u32 switches (last second),
                                        u32 trace_events (last second), u32 trace_dropped (total),
-                                       u16 idle_permille, u16 tick_hz,
-                                       u32 ctx_switch_max, u32 isr_to_task_max (cycles, measured since reset) */
+                                       u16 idle_permille, u16 tick_hz, u32 ctx_switch_max, u32 isr_to_task_max,
+                                       u16 probe_permille (CPU spent in the probe hooks), u16 kernel_permille
+                                       (scheduler time between two tasks), u32 heap_total, u32 heap_free,
+                                       u32 heap_min_ever */
+#define HIL_T_QUEUE_STATS 0x14u     /* one registered queue, once per second: u8 qid, u8 reserved,
+                                       u16 length, u16 waiting (now), u16 max_fill (since reset),
+                                       u32 send_failures (since reset), name: the rest of the payload */
 #define HIL_T_EVENT       0x20u     /* u32 t_ms, u8 code, i32 arg */
 #define HIL_T_ACK         0x82u     /* u8 acked_type, u8 status, i16 value */
-/* supervisor -> STM32 */
+/* supervisor -> target */
 #define HIL_T_CMD_SETPOINT 0x80u    /* i16 rpm10 (requested speed, used in REMOTE mode) */
 #define HIL_T_CMD_MODE     0x81u    /* u8 mode */
+#define HIL_T_CMD_FAULT    0x83u    /* u8 fault (HIL_FAULT_*): deliberate fault, to prove the detectors */
 
-/* ---- Control modes ----------------------------------------------------- */
+/* ---- Task flags and states ----------------------------------------------- */
+#define HIL_TF_IDLE       0x01u     /* the idle task: always ready, no jobs */
+#define HIL_TS_RUNNING    0u        /* same values as FreeRTOS eTaskState */
+#define HIL_TS_READY      1u
+#define HIL_TS_BLOCKED    2u
+#define HIL_TS_SUSPENDED  3u
+#define HIL_TS_DELETED    4u
+
+/* ---- Control modes (demo application) ------------------------------------ */
 #define HIL_MODE_IDLE     0u        /* setpoint 0; default after reset */
 #define HIL_MODE_LOCAL    1u        /* potentiometer */
 #define HIL_MODE_REMOTE   2u        /* setpoint received from the supervisor */
 #define HIL_MODE_TEST     3u        /* software square wave (step-response test) */
 #define HIL_MODE_NONE     0xFFu     /* "not applicable" (supervisor heartbeat) */
+
+/* ---- Fault injection (HIL_T_CMD_FAULT) ----------------------------------- */
+#define HIL_FAULT_CPU_HOG    1u     /* a task runs 150 ms without blocking: lower tasks starve, deadlines missed */
+#define HIL_FAULT_STACK      2u     /* a task uses most of its stack: low-stack alarm (no real overflow) */
+#define HIL_FAULT_QUEUE      3u     /* a producer floods a queue faster than its consumer: queue full */
+#define HIL_FAULT_INVERSION  4u     /* low-priority mutex holder blocks a high-priority task: inheritance */
+#define HIL_FAULT_HEAP       5u     /* heap filled to about 25 % free for 3 s, then released */
 
 /* ---- Event codes (HIL_T_EVENT) ------------------------------------------ */
 #define HIL_EVT_STALL          1u   /* arg = 0: motor driven hard without motion, output forced off */
@@ -66,12 +93,23 @@ extern "C" {
 #define HIL_EVT_SP_TIMEOUT     6u   /* arg = 0: REMOTE setpoint not refreshed for 1 s, setpoint -> 0.
                                        The operator must resend the setpoint at least every second:
                                        a supervisor that is merely alive does not keep the motor running. */
+/* RTOS probe detectors */
+#define HIL_EVT_DEADLINE_MISS  7u   /* arg = tag | misses_last_second << 8 */
+#define HIL_EVT_PRIO_INHERIT   8u   /* arg = holder_tag | new_priority << 8 | waiter_tag << 16 */
+#define HIL_EVT_PRIO_RESTORE   9u   /* arg = holder_tag | inherited_for_us << 8 */
+#define HIL_EVT_QUEUE_FULL    10u   /* arg = qid | failures_last_second << 8 */
+#define HIL_EVT_FAULT_INJECT  11u   /* arg = HIL_FAULT_* */
+#define HIL_EVT_STACK_LOW     12u   /* arg = tag | free_words << 8 (below 30 % of the stack) */
+#define HIL_EVT_CPU_HOG       13u   /* arg = tag | job_ms << 8: one job ran 50 ms or more without blocking */
+#define HIL_EVT_STARVED       14u   /* arg = tag: ready for a whole second without running */
+#define HIL_EVT_HEAP_LOW      15u   /* arg = minimum free bytes (below 30 % of the heap) */
 
 /* ---- Trace event ids (HIL_T_TRACE) --------------------------------------- */
 #define HIL_TR_TASK_MAX   0x3Fu     /* 0x00..0x3F: task with this tag switched in (0 = untagged task) */
 #define HIL_TR_ISR_IN     0x40u     /* 0x40 | isr: interrupt handler entered */
 #define HIL_TR_ISR_OUT    0x80u     /* 0x80 | isr: interrupt handler left */
-#define HIL_TR_TICK       0xC0u     /* RTOS tick (instant) */
+#define HIL_TR_READY      0xC0u     /* 0xC0 | tag (tag < 0x3F): task released (became ready) */
+#define HIL_TR_TICK       0xFFu     /* RTOS tick (instant) */
 #define HIL_ISR_ADC_DMA   1u        /* ADC DMA half/full transfer: wakes the acquisition task */
 
 /* ---- ACK status ---------------------------------------------------------- */
