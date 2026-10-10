@@ -1,171 +1,129 @@
-/* Supervisor node (Elyssa, ESP32-S3) - step 1: framed UART link with the STM32.
+/* Supervisor node (Elyssa, ESP32-S3) - step 2: STM32 link + Wi-Fi + web dashboard.
 
-   - Decodes the frames of hil_proto.h (CRC, sequence gaps), prints telemetry,
-     events and acknowledgements on the USB serial console.
-   - Detects the loss of the STM32 (no valid frame for LOST_MS) and reports it.
-   - Sends a heartbeat every 100 ms: it is the keep-alive of the STM32 dead-man timer.
-   - Console commands (USB serial, 115200, end each line with Enter):
-       mode idle | local | remote | test     select the controller mode
-       sp <rpm>                               requested speed, used in REMOTE mode
-       stat                                   link statistics
-     The STM32 is the authority: it clamps, ramps and may refuse; the ACK says what it accepted.
+   Modules (same folder): link.* (STM32 frames), net.* (Wi-Fi, setup portal),
+   web.* (HTTP server, WebSocket), dashboard.h (page), hil_proto.h (copy, see tools/sync_proto.ps1).
 
-   UART link to the STM32 (3.3 V logic, common GND, never join the 3V3 rails):
-     Elyssa RX (GPIO44) <- STM32 PB6 (TX)      Elyssa TX (GPIO43) -> STM32 PB7 (RX)
-   Serial = USB (USB CDC On Boot enabled); Serial1 = the STM32 link, remapped to GPIO44/43. */
+   Wi-Fi: the first time (or after "wifi reset", or a 3 s press on BOOT), Elyssa opens the
+   Wi-Fi network "Elyssa-Setup": connect to it, a page lists the networks, choose yours.
+   Then open http://elyssa.local (or the address printed below) on a computer of that network.
 
-#include "hil_proto.h"
+   USB console (115200, line ending NL or NL+CR):
+     mode idle|local|remote|test     sp <rpm>     stat     wifi reset
 
-static const uint32_t LINK_BAUD = 921600;
-static const int      LINK_RX   = 44;
-static const int      LINK_TX   = 43;
-static const uint32_t LOST_MS   = 300;       /* no valid frame for this long: STM32 lost */
-static const uint32_t PRINT_MS  = 500;       /* telemetry line period on the console */
+   Safety: the STM32 decides (clamps, ramps, refuses). In REMOTE the setpoint must be refreshed:
+   the browser resends it every 200 ms; Elyssa forwards it only while the browser is fresh, so a
+   closed page or a lost Wi-Fi brings the motor back to 0 within 1 s (STM32 dead-man).
 
-static hil_parser_t parser;
-static hil_seq_t    rxSeq;
-static uint8_t      txSeq;
+   UART to the STM32 (3.3 V, common GND, never join the 3V3 rails):
+     Elyssa RX (GPIO44) <- PB6      Elyssa TX (GPIO43) -> PB7 */
 
-/* Latest telemetry. */
-static uint32_t tT;
-static int16_t  tSp, tRpm10;
-static uint16_t tDuty;
-static uint8_t  tFault, tMode;
-static bool     haveTelemetry;
+#include "link.h"
+#include "net.h"
+#include "web.h"
 
-static uint32_t lastFrameMs, lastHbMs, lastPrintMs;
-static bool     alive;                        /* STM32 considered present */
-static uint32_t lostEvents;
+static const uint32_t HEARTBEAT_MS   = 100;
+static const uint32_t SP_REFRESH_MS  = 200;
+static const uint32_t WEB_FRESH_MS   = 1000;  /* browser setpoint older than this: stop forwarding */
+static const uint32_t TEL_BATCH_MS   = 100;
+static const uint32_t SYS_MS         = 1000;
+static const uint32_t PRINT_MS       = 1000;
 
+/* REMOTE setpoint holder: who asked for it and when. */
+enum SpSource : uint8_t { SRC_NONE, SRC_CONSOLE, SRC_WEB };
+static float    remoteRpm;
+static SpSource remoteSrc = SRC_NONE;
+static uint32_t remoteMs;
+
+/* Telemetry samples collected between two WebSocket batches (100 Hz in, 10 Hz out). */
+static Telemetry batch[16];
+static uint8_t   batchN;
+
+static uint32_t lastHbMs, lastSpMs, lastBatchMs, lastSysMs, lastPrintMs;
 static char     cmdBuf[40];
 static uint8_t  cmdLen;
+static int16_t  lastAckValue[2] = { -1, -1 };  /* [0] mode, [1] setpoint: print only on change */
 
-static const char *modeName(uint8_t m)
+/* ---- Link callbacks ------------------------------------------------------------- */
+
+void on_telemetry(const Telemetry &t)
 {
-  switch (m) {
-    case HIL_MODE_IDLE:   return "IDLE";
-    case HIL_MODE_LOCAL:  return "LOCAL";
-    case HIL_MODE_REMOTE: return "REMOTE";
-    case HIL_MODE_TEST:   return "TEST";
-    default:              return "?";
-  }
+  if (batchN < sizeof batch / sizeof batch[0]) batch[batchN++] = t;
 }
 
-static void sendFrame(uint8_t type, const uint8_t *payload, uint8_t len)
+void on_event(uint32_t t, uint8_t code, int32_t arg)
 {
-  uint8_t buf[HIL_OVERHEAD + 16];
-  const size_t n = hil_encode(buf, type, txSeq++, payload, len);
-  Serial1.write(buf, n);
+  Serial.printf("[EVENT] t=%lu ms %s arg=%ld\n", (unsigned long)t, link_event_name(code), (long)arg);
+  char j[128];
+  snprintf(j, sizeof j, "{\"type\":\"evt\",\"t\":%lu,\"code\":%u,\"name\":\"%s\",\"arg\":%ld}",
+           (unsigned long)t, code, link_event_name(code), (long)arg);
+  web_broadcast(j);
 }
 
-static void sendHeartbeat()
+void on_ack(uint8_t type, uint8_t status, int16_t value)
 {
-  uint8_t pl[6];
-  hil_put_u32(&pl[0], millis());
-  pl[4] = 0;
-  pl[5] = HIL_MODE_NONE;
-  sendFrame(HIL_T_HEARTBEAT, pl, sizeof pl);
+  static const char *st[] = { "ok", "clamped", "rejected" };
+  const int k = (type == HIL_T_CMD_MODE) ? 0 : 1;
+  if (status == HIL_ACK_OK && value == lastAckValue[k]) return;     /* periodic refresh: stay quiet */
+  lastAckValue[k] = value;
+  const char *name = (type == HIL_T_CMD_MODE) ? "mode" : "sp";
+  const char *s = status < 3 ? st[status] : "?";
+  Serial.printf("[ACK] %s %s value=%d\n", name, s, (int)value);
+  char j[96];
+  snprintf(j, sizeof j, "{\"type\":\"ack\",\"cmd\":\"%s\",\"status\":\"%s\",\"value\":%d}", name, s, (int)value);
+  web_broadcast(j);
 }
 
-/* A command is "pending" until the STM32 acknowledges it (or 500 ms pass). */
-static uint32_t cmdSentMs;
-static bool     cmdPending;
-
-static void sendMode(uint8_t mode)
+void on_ack_timeout()
 {
-  Serial.printf("[CMD] sending mode %s\n", modeName(mode));
-  sendFrame(HIL_T_CMD_MODE, &mode, 1);
-  cmdSentMs = millis();
-  cmdPending = true;
+  Serial.println("[CMD] no ACK from the STM32 within 500 ms (command lost, or not received)");
+  web_broadcast("{\"type\":\"info\",\"text\":\"no ACK from the STM32 within 500 ms\"}");
 }
 
-static void sendSetpoint(float rpm)
+void on_link_state(bool alive)
 {
-  float v = rpm * 10.0f;
-  if (v > 32767.0f) v = 32767.0f;
-  if (v < -32768.0f) v = -32768.0f;
-  Serial.printf("[CMD] sending setpoint %.1f rpm\n", rpm);
-  uint8_t pl[2];
-  hil_put_u16(pl, (uint16_t)(int16_t)v);
-  sendFrame(HIL_T_CMD_SETPOINT, pl, sizeof pl);
-  cmdSentMs = millis();
-  cmdPending = true;
+  Serial.println(alive ? "[LINK] STM32 present" : "[LINK] STM32 LOST (no valid frame)");
+  web_broadcast(alive ? "{\"type\":\"info\",\"text\":\"STM32 present\"}" : "{\"type\":\"info\",\"text\":\"STM32 LOST\"}");
 }
 
-static void handleFrame(const hil_frame_t &f)
+void on_stm32_restart()
 {
-  switch (f.type) {
-    case HIL_T_TELEMETRY:
-      if (f.len == 12) {
-        tT      = hil_get_u32(f.payload);
-        tSp     = hil_get_i16(f.payload + 4);
-        tRpm10  = hil_get_i16(f.payload + 6);
-        tDuty   = hil_get_u16(f.payload + 8);
-        tFault  = f.payload[10];
-        tMode   = f.payload[11];
-        haveTelemetry = true;
-      }
-      break;
-    case HIL_T_HEARTBEAT:
-      break;                                   /* presence only */
-    case HIL_T_EVENT:
-      if (f.len == 9) {
-        Serial.printf("[EVENT] t=%lu ms code=%u arg=%ld\n",
-                      (unsigned long)hil_get_u32(f.payload), f.payload[4], (long)hil_get_i32(f.payload + 5));
-      }
-      break;
-    case HIL_T_ACK:
-      if (f.len == 4) {
-        static const char *st[] = { "ok", "clamped", "rejected" };
-        const uint8_t s = f.payload[1];
-        cmdPending = false;
-        Serial.printf("[ACK] type=0x%02X %s value=%d\n", f.payload[0], s < 3 ? st[s] : "?", (int)hil_get_i16(f.payload + 2));
-      }
-      break;
-    default:
-      Serial.printf("[RX] unhandled type 0x%02X len=%u\n", f.type, f.len);
-      break;
-  }
+  Serial.println("[LINK] STM32 restarted");
+  web_broadcast("{\"type\":\"info\",\"text\":\"STM32 restarted\"}");
 }
 
-static void pollLink()
+/* ---- Commands (console and browser go through the same path) ---------------------- */
+
+static void commandMode(uint8_t mode)
 {
-  hil_frame_t f;
-  while (Serial1.available() > 0) {
-    hil_parser_push(&parser, (uint8_t)Serial1.read());
-    while (hil_parser_next(&parser, &f)) {
-      /* The STM32 clock going backwards means it was reset: its sequence numbers restart
-         at 0, which must not be counted as lost frames. */
-      if (f.type == HIL_T_TELEMETRY && f.len == 12 && haveTelemetry &&
-          (hil_get_u32(f.payload) + 1000U) < tT) {
-        hil_seq_init(&rxSeq);
-        Serial.println("[LINK] STM32 restarted");
-      }
-      hil_seq_update(&rxSeq, f.seq);
-      lastFrameMs = millis();
-      if (!alive) {
-        alive = true;
-        Serial.println("[LINK] STM32 present");
-      }
-      handleFrame(f);
-    }
-  }
-  if (alive && (millis() - lastFrameMs) > LOST_MS) {
-    alive = false;
-    lostEvents++;
-    Serial.println("[LINK] STM32 LOST (no valid frame)");
+  remoteSrc = SRC_NONE;                        /* a new mode never reuses an old setpoint */
+  remoteRpm = 0;
+  lastAckValue[0] = -1;
+  Serial.printf("[CMD] mode %s\n", link_mode_name(mode));
+  link_send_mode(mode);
+}
+
+static void commandSetpoint(float rpm, SpSource src)
+{
+  const bool changed = (src != remoteSrc) || (rpm != remoteRpm);
+  remoteRpm = rpm;
+  remoteSrc = src;
+  remoteMs  = millis();
+  if (changed) {
+    Serial.printf("[CMD] setpoint %.1f rpm (%s)\n", rpm, src == SRC_WEB ? "browser" : "console");
+    link_send_setpoint(rpm, false);
   }
 }
 
 static void printStats()
 {
-  Serial.printf("[STAT] frames ok=%lu crc errors=%lu bad len=%lu lost(seq)=%lu link lost events=%lu\n",
-                (unsigned long)parser.framesOk, (unsigned long)parser.crcErrors, (unsigned long)parser.badLen,
-                (unsigned long)rxSeq.lost, (unsigned long)lostEvents);
+  Serial.printf("[STAT] frames ok=%lu crc errors=%lu lost(seq)=%lu link lost events=%lu | wifi %s %s %d dBm, browsers=%d\n",
+                (unsigned long)link_frames_ok(), (unsigned long)link_crc_errors(), (unsigned long)link_seq_lost(),
+                (unsigned long)link_lost_events(), net_portal() ? "portal" : "station", net_ip().c_str(),
+                net_rssi(), web_clients());
 }
 
-/* Case-insensitive; "mode test" and just "test" both work; "sp 800" and "sp=800" too. */
-static void handleCommand(char *line)
+/* Case-insensitive; "mode test" and "test" both work; "sp 800" and "sp=800" too. */
+static void handleConsoleLine(char *line)
 {
   for (char *c = line; *c != '\0'; c++) {
     if (*c >= 'A' && *c <= 'Z') *c = (char)(*c + 32);
@@ -173,20 +131,20 @@ static void handleCommand(char *line)
   }
   const char *p = line;
   while (*p == ' ') p++;
-  if (*p == '\0') return;                       /* empty line (CR then LF) */
-  Serial.printf("[CMD] received \"%s\"\n", p);
+  if (*p == '\0') return;
 
+  if (!strncmp(p, "wifi reset", 10)) { net_forget_and_restart(); return; }
+  if (!strncmp(p, "stat", 4))        { printStats(); return; }
   if (!strncmp(p, "mode", 4)) p += 4;
   while (*p == ' ') p++;
 
   float v = 0;
-  if      (!strncmp(p, "idle", 4))   sendMode(HIL_MODE_IDLE);
-  else if (!strncmp(p, "local", 5))  sendMode(HIL_MODE_LOCAL);
-  else if (!strncmp(p, "remote", 6)) sendMode(HIL_MODE_REMOTE);
-  else if (!strncmp(p, "test", 4))   sendMode(HIL_MODE_TEST);
-  else if (!strncmp(p, "sp", 2) && sscanf(p + 2, "%f", &v) == 1) sendSetpoint(v);
-  else if (!strncmp(p, "stat", 4))   printStats();
-  else Serial.println("commands: mode idle|local|remote|test, sp <rpm>, stat");
+  if      (!strncmp(p, "idle", 4))   commandMode(HIL_MODE_IDLE);
+  else if (!strncmp(p, "local", 5))  commandMode(HIL_MODE_LOCAL);
+  else if (!strncmp(p, "remote", 6)) commandMode(HIL_MODE_REMOTE);
+  else if (!strncmp(p, "test", 4))   commandMode(HIL_MODE_TEST);
+  else if (!strncmp(p, "sp", 2) && sscanf(p + 2, "%f", &v) == 1) commandSetpoint(v, SRC_CONSOLE);
+  else Serial.println("commands: mode idle|local|remote|test, sp <rpm>, stat, wifi reset");
 }
 
 static void pollConsole()
@@ -195,7 +153,7 @@ static void pollConsole()
     const char c = (char)Serial.read();
     if (c == '\n' || c == '\r') {
       cmdBuf[cmdLen] = '\0';
-      handleCommand(cmdBuf);
+      handleConsoleLine(cmdBuf);
       cmdLen = 0;
     } else if (cmdLen < sizeof cmdBuf - 1) {
       cmdBuf[cmdLen++] = c;
@@ -203,50 +161,99 @@ static void pollConsole()
   }
 }
 
+static void pollWeb()
+{
+  WebCmd c;
+  while (web_next_command(&c)) {
+    if (c.kind == WEB_CMD_MODE) commandMode(c.mode);
+    else                        commandSetpoint(c.rpm, SRC_WEB);
+  }
+}
+
+/* REMOTE: forward the held setpoint while its source is fresh. The console holds it until
+   changed (debug tool); the browser must keep resending, otherwise forwarding stops and the
+   STM32 dead-man brings the motor back to 0. */
+static void refreshSetpoint()
+{
+  if (!link_have_telemetry() || link_last().mode != HIL_MODE_REMOTE || remoteSrc == SRC_NONE) return;
+  if (remoteSrc == SRC_WEB && millis() - remoteMs > WEB_FRESH_MS) return;
+  link_send_setpoint(remoteRpm, true);
+}
+
+/* ---- Periodic JSON for the browsers ------------------------------------------------- */
+
+static void sendBatch()
+{
+  if (batchN == 0) return;
+  char j[700];
+  const Telemetry &l = batch[batchN - 1];
+  int n = snprintf(j, sizeof j, "{\"type\":\"tel\",\"mode\":\"%s\",\"fault\":%u,\"s\":[",
+                   link_mode_name(l.mode), l.fault);
+  for (uint8_t i = 0; i < batchN && n < (int)sizeof j - 48; i++) {
+    const Telemetry &t = batch[i];
+    n += snprintf(j + n, sizeof j - n, "%s[%lu,%.1f,%.1f,%.1f]", i ? "," : "",
+                  (unsigned long)t.t, t.sp10 / 10.0f, t.rpm10 / 10.0f, t.dutyPm / 10.0f);
+  }
+  snprintf(j + n, sizeof j - n, "]}");
+  batchN = 0;
+  web_broadcast(j);
+}
+
+static void sendSys()
+{
+  char j[256];
+  snprintf(j, sizeof j,
+           "{\"type\":\"sys\",\"link\":%d,\"rx\":%lu,\"crc\":%lu,\"lost\":%lu,\"rssi\":%d,\"ip\":\"%s\",\"clients\":%d,\"up\":%lu,\"heap\":%lu}",
+           link_alive() ? 1 : 0, (unsigned long)link_frames_ok(), (unsigned long)link_crc_errors(),
+           (unsigned long)link_seq_lost(), net_rssi(), net_ip().c_str(), web_clients(),
+           (unsigned long)millis(), (unsigned long)ESP.getFreeHeap());
+  web_broadcast(j);
+}
+
 static void updateLed()
 {
-  if (!alive)                          setLedColor(ELYSSA_YELLOW);   /* no STM32 */
-  else if (haveTelemetry && tFault)    setLedColor(ELYSSA_RED);      /* motor fault */
-  else                                 setLedColor(ELYSSA_GREEN);
+  if (net_portal())                                   setLedColor(ELYSSA_BLUE);    /* waiting for Wi-Fi setup */
+  else if (!link_alive())                             setLedColor(ELYSSA_YELLOW);  /* no STM32 */
+  else if (link_have_telemetry() && link_last().fault) setLedColor(ELYSSA_RED);    /* motor fault */
+  else                                                setLedColor(ELYSSA_GREEN);
 }
 
 void setup()
 {
   Serial.begin(115200);
-  Serial1.setRxBufferSize(2048);
-  Serial1.begin(LINK_BAUD, SERIAL_8N1, LINK_RX, LINK_TX);
-  hil_parser_init(&parser);
-  hil_seq_init(&rxSeq);
-  setLedColor(ELYSSA_YELLOW);
-  Serial.println("supervisor ready: link 921600 8N1, commands: mode idle|local|remote|test, sp <rpm>, stat");
+  delay(500);
+  link_begin();
+  const bool station = net_begin();
+  web_begin(!station);
+  Serial.println("supervisor ready. commands: mode idle|local|remote|test, sp <rpm>, stat, wifi reset");
 }
 
 void loop()
 {
   const uint32_t now = millis();
 
-  pollLink();
+  link_poll();
   pollConsole();
+  pollWeb();
+  net_loop();
 
-  if (cmdPending && (millis() - cmdSentMs) > 500) {      /* millis(), not "now": cmdSentMs is set later in this pass */
-    cmdPending = false;
-    Serial.println("[CMD] no ACK from the STM32 within 500 ms (command lost, or not received)");
-  }
-
-  if (now - lastHbMs >= 100) {
-    lastHbMs = now;
-    sendHeartbeat();
-  }
+  if (now - lastHbMs >= HEARTBEAT_MS)  { lastHbMs = now;    link_send_heartbeat(); }
+  if (now - lastSpMs >= SP_REFRESH_MS) { lastSpMs = now;    refreshSetpoint(); }
+  if (now - lastBatchMs >= TEL_BATCH_MS) { lastBatchMs = now; sendBatch(); }
+  if (now - lastSysMs >= SYS_MS)       { lastSysMs = now;   sendSys(); updateLed(); }
 
   if (now - lastPrintMs >= PRINT_MS) {
     lastPrintMs = now;
-    if (haveTelemetry && alive) {
-      Serial.printf("t=%lu mode=%s sp=%.1f rpm=%.1f duty=%.1f%% fault=%u | rx ok=%lu crc=%lu lost=%lu\n",
-                    (unsigned long)tT, modeName(tMode), tSp / 10.0f, tRpm10 / 10.0f, tDuty / 10.0f, tFault,
-                    (unsigned long)parser.framesOk, (unsigned long)parser.crcErrors, (unsigned long)rxSeq.lost);
-    } else if (!alive) {
-      Serial.println("waiting for the STM32 ...");
+    if (link_have_telemetry() && link_alive()) {
+      const Telemetry &t = link_last();
+      Serial.printf("t=%lu mode=%s sp=%.1f rpm=%.1f duty=%.1f%% fault=%u | rx ok=%lu crc=%lu lost=%lu | %s %s\n",
+                    (unsigned long)t.t, link_mode_name(t.mode), t.sp10 / 10.0f, t.rpm10 / 10.0f, t.dutyPm / 10.0f,
+                    t.fault, (unsigned long)link_frames_ok(), (unsigned long)link_crc_errors(),
+                    (unsigned long)link_seq_lost(), net_portal() ? "portal" : "wifi", net_ip().c_str());
+    } else if (!link_alive()) {
+      Serial.printf("waiting for the STM32 ... (%s %s)\n", net_portal() ? "portal" : "wifi", net_ip().c_str());
     }
-    updateLed();
   }
+
+  delay(1);                                  /* yield: the Wi-Fi and server tasks need CPU too */
 }

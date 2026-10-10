@@ -1,0 +1,240 @@
+#include "web.h"
+#include "net.h"
+#include "hil_proto.h"
+#include "dashboard.h"
+#include <esp_http_server.h>
+
+static httpd_handle_t server;
+static bool           portal;
+static QueueHandle_t  cmdQueue;
+static volatile int   wsClients;
+
+/* ---- Small helpers ---------------------------------------------------------- */
+
+static String urlDecode(const String &s)
+{
+  String o;
+  for (size_t i = 0; i < s.length(); i++) {
+    const char c = s[i];
+    if (c == '+') { o += ' '; continue; }
+    if (c == '%' && i + 2 < s.length()) {
+      char hex[3] = { s[i + 1], s[i + 2], 0 };
+      o += (char)strtol(hex, nullptr, 16);
+      i += 2;
+      continue;
+    }
+    o += c;
+  }
+  return o;
+}
+
+static String formField(const String &body, const char *name)
+{
+  const String key = String(name) + "=";
+  int start = 0;
+  while (start < (int)body.length()) {
+    int end = body.indexOf('&', start);
+    if (end < 0) end = body.length();
+    if (body.substring(start, start + key.length()) == key) {
+      return urlDecode(body.substring(start + key.length(), end));
+    }
+    start = end + 1;
+  }
+  return "";
+}
+
+/* ---- Portal pages -------------------------------------------------------------- */
+
+static esp_err_t portal_get(httpd_req_t *req)
+{
+  String page =
+    "<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
+    "<title>Elyssa setup</title><style>body{font-family:system-ui,sans-serif;max-width:420px;margin:2em auto;padding:0 16px}"
+    "label{display:block;margin-top:1em}select,input,button{width:100%;padding:.6em;margin-top:.3em;font-size:1em;box-sizing:border-box}"
+    "button{margin-top:1.5em}</style></head><body><h2>Elyssa: Wi-Fi setup</h2>"
+    "<p>Choose the network the supervisor must join (2.4 GHz only).</p>"
+    "<form method='POST' action='/save'><label>Network<select name='ssid'>";
+  page += net_portal_options();
+  page +=
+    "</select></label><label>Or type the name (hidden network)<input name='ssid2' autocomplete='off'></label>"
+    "<label>Password<input name='pass' type='password'></label><button>Save and connect</button></form></body></html>";
+  httpd_resp_set_type(req, "text/html");
+  return httpd_resp_send(req, page.c_str(), page.length());
+}
+
+static esp_err_t portal_save(httpd_req_t *req)
+{
+  char buf[256];
+  const int total = req->content_len;
+  if (total <= 0 || total >= (int)sizeof buf) {
+    httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad form");
+    return ESP_FAIL;
+  }
+  int got = 0;
+  while (got < total) {
+    const int r = httpd_req_recv(req, buf + got, total - got);
+    if (r <= 0) return ESP_FAIL;
+    got += r;
+  }
+  buf[got] = 0;
+  const String body(buf);
+  String ssid = formField(body, "ssid2");
+  if (ssid.length() == 0) ssid = formField(body, "ssid");
+  const String pass = formField(body, "pass");
+  if (ssid.length() == 0) {
+    httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "no network chosen");
+    return ESP_FAIL;
+  }
+  const char *ok =
+    "<!doctype html><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
+    "<body style='font-family:system-ui;max-width:420px;margin:2em auto;padding:0 16px'>"
+    "<h2>Saved</h2><p>Elyssa restarts and joins the network. Reconnect your computer to that network, "
+    "then open <b>http://elyssa.local</b> (or the address printed on the USB console).</p></body>";
+  httpd_resp_set_type(req, "text/html");
+  httpd_resp_send(req, ok, HTTPD_RESP_USE_STRLEN);
+  net_save_and_restart(ssid, pass);
+  return ESP_OK;
+}
+
+/* Captive portal: any other URL (OS connectivity checks) is sent to the setup page. */
+static esp_err_t portal_redirect(httpd_req_t *req)
+{
+  const String to = "http://" + net_ip() + "/";
+  httpd_resp_set_status(req, "302 Found");
+  httpd_resp_set_hdr(req, "Location", to.c_str());
+  return httpd_resp_send(req, nullptr, 0);
+}
+
+/* ---- Dashboard ------------------------------------------------------------------- */
+
+static esp_err_t dashboard_get(httpd_req_t *req)
+{
+  httpd_resp_set_type(req, "text/html");
+  return httpd_resp_send(req, DASHBOARD_HTML, HTTPD_RESP_USE_STRLEN);
+}
+
+/* Commands from the browser, as JSON: {"cmd":"mode","value":"remote"} or {"cmd":"sp","value":800} */
+static void parseCommand(const char *s)
+{
+  WebCmd c{};
+  const char *v = strstr(s, "\"value\"");
+  if (v == nullptr) return;
+  v = strchr(v, ':');
+  if (v == nullptr) return;
+  v++;
+  while (*v == ' ' || *v == '"') v++;
+
+  if (strstr(s, "\"cmd\":\"mode\"") != nullptr) {
+    c.kind = WEB_CMD_MODE;
+    if      (!strncmp(v, "idle", 4))   c.mode = HIL_MODE_IDLE;
+    else if (!strncmp(v, "local", 5))  c.mode = HIL_MODE_LOCAL;
+    else if (!strncmp(v, "remote", 6)) c.mode = HIL_MODE_REMOTE;
+    else if (!strncmp(v, "test", 4))   c.mode = HIL_MODE_TEST;
+    else return;
+  } else if (strstr(s, "\"cmd\":\"sp\"") != nullptr) {
+    c.kind = WEB_CMD_SETPOINT;
+    c.rpm = strtof(v, nullptr);
+  } else {
+    return;
+  }
+  xQueueSend(cmdQueue, &c, 0);                 /* full queue: drop, the browser resends */
+}
+
+static esp_err_t ws_handler(httpd_req_t *req)
+{
+  if (req->method == HTTP_GET) return ESP_OK;  /* handshake */
+
+  httpd_ws_frame_t f{};
+  f.type = HTTPD_WS_TYPE_TEXT;
+  esp_err_t err = httpd_ws_recv_frame(req, &f, 0);
+  if (err != ESP_OK || f.len == 0 || f.len > 256) return err;
+  char buf[257];
+  f.payload = (uint8_t *)buf;
+  err = httpd_ws_recv_frame(req, &f, f.len);
+  if (err != ESP_OK) return err;
+  buf[f.len] = 0;
+  if (f.type == HTTPD_WS_TYPE_TEXT) parseCommand(buf);
+  return ESP_OK;
+}
+
+/* ---- Broadcast (runs in the server task through httpd_queue_work) ----------------- */
+
+struct WsMsg { size_t len; char data[1]; };
+
+static void broadcast_work(void *arg)
+{
+  WsMsg *m = (WsMsg *)arg;
+  size_t n = 8;
+  int fds[8];
+  int count = 0;
+  if (httpd_get_client_list(server, &n, fds) == ESP_OK) {
+    for (size_t i = 0; i < n; i++) {
+      if (httpd_ws_get_fd_info(server, fds[i]) != HTTPD_WS_CLIENT_WEBSOCKET) continue;
+      httpd_ws_frame_t f{};
+      f.type = HTTPD_WS_TYPE_TEXT;
+      f.payload = (uint8_t *)m->data;
+      f.len = m->len;
+      httpd_ws_send_frame_async(server, fds[i], &f);
+      count++;
+    }
+  }
+  wsClients = count;
+  free(m);
+}
+
+void web_broadcast(const char *json)
+{
+  if (server == nullptr || portal) return;
+  const size_t len = strlen(json);
+  WsMsg *m = (WsMsg *)malloc(sizeof(WsMsg) + len);
+  if (m == nullptr) return;
+  m->len = len;
+  memcpy(m->data, json, len + 1);
+  if (httpd_queue_work(server, broadcast_work, m) != ESP_OK) free(m);
+}
+
+int web_clients() { return wsClients; }
+
+bool web_next_command(WebCmd *c)
+{
+  return cmdQueue != nullptr && xQueueReceive(cmdQueue, c, 0) == pdTRUE;
+}
+
+/* ---- Start ---------------------------------------------------------------------- */
+
+static void addUri(const char *uri, httpd_method_t method, esp_err_t (*handler)(httpd_req_t *), bool ws)
+{
+  httpd_uri_t u{};
+  u.uri = uri;
+  u.method = method;
+  u.handler = handler;
+  u.user_ctx = nullptr;
+  u.is_websocket = ws;
+  httpd_register_uri_handler(server, &u);
+}
+
+void web_begin(bool isPortal)
+{
+  portal = isPortal;
+  cmdQueue = xQueueCreate(8, sizeof(WebCmd));
+
+  httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
+  cfg.max_open_sockets = 7;
+  cfg.lru_purge_enable = true;
+  cfg.uri_match_fn = httpd_uri_match_wildcard;
+  if (httpd_start(&server, &cfg) != ESP_OK) {
+    Serial.println("[WEB] server failed to start");
+    server = nullptr;
+    return;
+  }
+
+  if (portal) {
+    addUri("/", HTTP_GET, portal_get, false);
+    addUri("/save", HTTP_POST, portal_save, false);
+    addUri("/*", HTTP_GET, portal_redirect, false);   /* registered last: matched last */
+  } else {
+    addUri("/", HTTP_GET, dashboard_get, false);
+    addUri("/ws", HTTP_GET, ws_handler, true);
+  }
+  Serial.printf("[WEB] server started (%s)\n", portal ? "setup portal" : "dashboard");
+}
