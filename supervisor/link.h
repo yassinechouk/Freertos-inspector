@@ -17,6 +17,7 @@ void            link_begin();
 void            link_poll();                       /* call often: parses, detects loss and missing ACKs */
 void            link_send_heartbeat();
 void            link_send_mode(uint8_t mode);      /* explicit command: an ACK is expected */
+void            link_send_fault(uint8_t fault);    /* HIL_FAULT_*: deliberate fault on the target */
 void            link_send_setpoint(float rpm, bool quiet);
 bool            link_alive();
 bool            link_have_telemetry();
@@ -40,3 +41,4 @@ void on_task_table(const uint8_t *p, uint8_t len);
 void on_task_stats(const uint8_t *p, uint8_t len);
 void on_rtos_sys(const uint8_t *p, uint8_t len);
 void on_trace(const uint8_t *p, uint8_t len);
+void on_queue_stats(const uint8_t *p, uint8_t len);

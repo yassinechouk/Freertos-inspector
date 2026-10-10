@@ -3,124 +3,155 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>HIL bench</title>
-<link rel="stylesheet" href="/uPlot.min.css">
-<link rel="stylesheet" href="/style.css">
+<title>RTOS Doctor</title>
+<meta name="description" content="Live FreeRTOS monitor: tasks, timing, timeline, schedulability analysis, alerts and fault injection.">
+<link rel="stylesheet" href="vendor/uPlot.min.css">
+<link rel="stylesheet" href="style.css">
 </head>
 <body>
-<header>
-  <h1>HIL motor bench</h1>
-  <span id="pws" class="pill">browser: connecting</span>
-  <span id="pstm" class="pill">STM32: ?</span>
-  <span id="pmode" class="pill">mode: ?</span>
-  <span id="pfault" class="pill">fault: ?</span>
-  <nav>
-    <button class="tab on" data-tab="live">Live</button>
-    <button class="tab" data-tab="rtos">RTOS</button>
-    <button class="tab" data-tab="events">Events</button>
-  </nav>
+<header class="top">
+  <div class="brand"><b>RTOS Doctor</b><span>FreeRTOS live monitor</span></div>
+  <span id="h-src" class="pill">connecting…</span>
+  <span id="h-target" class="pill">target: –</span>
+  <div class="session">
+    <button id="s-rec" title="Record everything received, then save it to a file">● Record</button>
+    <button id="s-load" title="Replay a recorded session file">Load session</button>
+    <input id="s-file" type="file" accept=".json,application/json" hidden>
+    <button id="s-play" hidden>❚❚ Pause</button>
+    <select id="s-speed" hidden title="replay speed"><option value="1">1×</option><option value="2">2×</option><option value="5">5×</option></select>
+    <button id="s-live" hidden>Back to live</button>
+  </div>
 </header>
+<nav class="tabs">
+  <button class="tab" data-view="overview">Overview</button>
+  <button class="tab" data-view="tasks">Tasks</button>
+  <button class="tab" data-view="timeline">Timeline</button>
+  <button class="tab" data-view="analysis">Analysis</button>
+  <button class="tab" data-view="resources">Resources</button>
+  <button class="tab" id="t-alerts" data-view="alerts">Alerts</button>
+  <button class="tab" data-view="faults">Fault lab</button>
+  <button class="tab" data-view="motor">Demo: motor</button>
+</nav>
 
-<main id="live" class="view on">
-  <section class="card motor">
-    <h2>Motor</h2>
-    <div id="motor3d"><p id="motor3dmsg" class="note">loading 3D view ...</p></div>
-    <div class="big">
-      <div><small>setpoint</small><span id="vsp">-</span><small>rpm</small></div>
-      <div><small>speed</small><span id="vrpm">-</span><small>rpm</small></div>
-      <div><small>duty</small><span id="vduty">-</span><small>%</small></div>
-    </div>
-    <p class="note" id="slowmo"></p>
+<!-- Overview -->
+<main id="overview" class="view">
+  <section class="card wide">
+    <div id="ov-verdict" class="verdict-big off"><b>Waiting for data</b><span></span></div>
+    <div id="ov-lights" class="lights"></div>
   </section>
+  <section class="card wide"><h2>Key figures</h2><div id="ov-kpis" class="kpis"></div></section>
+  <section class="card"><h2>CPU share per task (last second)</h2><div id="ov-cpu"></div></section>
+  <section class="card"><h2>Latest warnings</h2><ul id="ov-alerts" class="mini-alerts"></ul></section>
+</main>
 
-  <section class="card controls">
+<!-- Tasks -->
+<main id="tasks" class="view">
+  <section class="card wide">
+    <h2>Tasks <small>discovered automatically · highest priority first</small></h2>
+    <div class="tablewrap"><table class="grid">
+      <thead><tr>
+        <th>task</th><th>state</th><th title="base priority (→ inherited)">priority</th><th title="mean release interval ± worst deviation (jitter)">period</th>
+        <th>deadline</th><th title="execution time per job: average, max">C</th><th title="response time: min … max">R</th>
+        <th title="deadline misses since reset (+ last 10 s)">misses</th><th>CPU</th><th>stack</th>
+      </tr></thead>
+      <tbody id="tk-body"></tbody>
+    </table></div>
+    <p class="note">A job runs from the release (the task becomes ready) to the moment it blocks again. C counts only
+      its own CPU time; R includes the time spent waiting for higher-priority work. Worst cases are since the target reset.</p>
+  </section>
+  <section class="card wide" id="tk-detail"></section>
+</main>
+
+<!-- Timeline -->
+<main id="timeline" class="view">
+  <section class="card wide">
+    <h2>Timeline
+      <select id="tl-win"><option value="5">5 ms</option><option value="20" selected>20 ms</option><option value="50">50 ms</option><option value="100">100 ms</option><option value="400">400 ms</option></select>
+      <button id="tl-pause" class="small">Pause</button></h2>
+    <canvas id="tl-canvas"></canvas>
+    <p class="note"><span class="key run"></span>running <span class="key ready"></span>ready, waiting for the CPU
+      <span class="key irq"></span>interrupt handler · ticks on the time axis · highest priority at the top. <span id="tl-info"></span></p>
+  </section>
+</main>
+
+<!-- Analysis -->
+<main id="analysis" class="view">
+  <section class="card wide"><h2>Schedulability</h2><div id="an-sum" class="kpis"></div></section>
+  <section class="card wide">
+    <h2>Response-time analysis <button id="an-reset" class="small">reset what-if</button></h2>
+    <div class="tablewrap"><table class="grid">
+      <thead><tr><th title="include in the analysis">use</th><th>task</th><th>priority</th><th>period (ms)</th><th>deadline</th>
+        <th>C (µs)</th><th>R computed</th><th>R measured</th><th>margin</th><th>verdict</th></tr></thead>
+      <tbody id="an-body"></tbody>
+    </table></div>
+    <p class="note">Values come from the measurements (worst C since reset, mean period). Edit priority, period or C to
+      ask "what if": only this page recomputes, the target is not changed. Equal priorities are counted as interference
+      (time slicing), and each preemption costs one measured context switch.</p>
+  </section>
+  <section class="card wide" id="an-steps"></section>
+</main>
+
+<!-- Resources -->
+<main id="resources" class="view">
+  <section class="card"><h2>Stacks <small>share ever used</small></h2><div id="rs-stacks"></div></section>
+  <section class="card"><h2>Heap</h2><div id="rs-heap"></div>
+    <h2 class="sp">Queues</h2><div id="rs-queues"></div></section>
+  <section class="card wide"><h2>Interrupts and cost of observing</h2><div id="rs-cost"></div></section>
+</main>
+
+<!-- Alerts -->
+<main id="alerts" class="view">
+  <section class="card wide">
+    <h2>Alerts
+      <button class="small on" data-af="all">all</button><button class="small" data-af="bad">problems</button>
+      <button class="small" data-af="warn">warnings</button><button class="small" data-af="info">info</button>
+      <button class="small" id="al-clear">clear</button></h2>
+    <ul id="al-list" class="alerts"></ul>
+  </section>
+</main>
+
+<!-- Fault lab -->
+<main id="faults" class="view">
+  <section class="card wide">
+    <h2>Fault lab</h2>
+    <p>Each button makes the target misbehave on purpose, in isolated demo tasks below the control loop, for a short
+      bounded time. The matching detector must report it: this is how the tool proves it works.</p>
+  </section>
+  <div id="fl-cards" class="faultgrid"></div>
+</main>
+
+<!-- Demo application -->
+<main id="motor" class="view">
+  <section class="card">
+    <h2>Motor (hardware in the loop)</h2>
+    <div id="mo-3d"><p id="mo-3dmsg" class="note">loading 3D view…</p></div>
+    <div class="big">
+      <div><small>setpoint</small><span id="mo-vsp">–</span><small>rpm</small></div>
+      <div><small>speed</small><span id="mo-vrpm">–</span><small>rpm</small></div>
+      <div><small>duty</small><span id="mo-vduty">–</span><small>%</small></div>
+    </div>
+    <p class="note" id="mo-slow"></p>
+  </section>
+  <section class="card">
     <h2>Control</h2>
     <div class="modes">
       <button data-m="idle">IDLE</button><button data-m="local">LOCAL</button>
       <button data-m="remote">REMOTE</button><button data-m="test">TEST</button>
     </div>
-    <div class="row"><span>0</span><b><span id="spv">0</span> rpm</b><span>3000</span></div>
-    <input id="sp" type="range" min="0" max="3000" step="10" value="0">
-    <button class="stop" id="stop">STOP (0 rpm)</button>
-    <p class="note">REMOTE: this page resends the setpoint 5 times per second; if it closes or the Wi-Fi drops,
-      the STM32 brings the motor back to 0 within 1 s. TEST: step-response square wave.</p>
+    <div class="row"><span>0</span><b><span id="mo-spv">0</span> rpm</b><span>3000</span></div>
+    <input id="mo-sp" type="range" min="0" max="3000" step="10" value="0">
+    <button class="stop" id="mo-stop">STOP (0 rpm)</button>
+    <p class="note">Motor fault: <b id="mo-fault">–</b></p>
+    <p class="note">This application is the workload that RTOS Doctor observes: a 1 kHz PI speed loop on the STM32,
+      a DC motor model on an ESP32 closing the loop with real PWM and encoder signals. In REMOTE, this page resends the
+      setpoint 5 times per second; if it closes, the target brings the motor back to 0 within 1 s.</p>
   </section>
-
-  <section class="card health">
-    <h2>Health</h2>
-    <ul class="ind">
-      <li><i id="hws"></i>browser link <b id="tws">-</b></li>
-      <li><i id="hstm"></i>STM32 link <b id="tstm">-</b></li>
-      <li><i id="hcrc"></i>CRC errors <b id="tcrc">-</b></li>
-      <li><i id="hlost"></i>frames lost <b id="tlost">-</b></li>
-      <li><i id="hwifi"></i>Wi-Fi signal <b id="twifi">-</b></li>
-      <li><i id="hfault"></i>motor fault <b id="tfault">-</b></li>
-      <li><i id="hheap"></i>supervisor memory <b id="theap">-</b></li>
-    </ul>
-    <p class="note" id="addr"></p>
-  </section>
-
-  <section class="card wide">
-    <h2>Speed (last 10 s)</h2>
-    <div id="chartSpeed" class="chart"></div>
-  </section>
-  <section class="card wide">
-    <h2>Duty cycle</h2>
-    <div id="chartDuty" class="chart small"></div>
-  </section>
+  <section class="card wide"><h2>Speed (last 10 s)</h2><div id="mo-speed" class="chart"></div></section>
+  <section class="card wide"><h2>Duty cycle</h2><div id="mo-duty" class="chart small"></div></section>
 </main>
 
-<main id="rtos" class="view">
-  <section class="card wide">
-    <h2>Scheduling verdict</h2>
-    <div class="kpis">
-      <div><small>verdict</small><span id="rverdict" class="verdict">-</span></div>
-      <div><small>CPU load</small><span id="rcpu">-</span></div>
-      <div><small>utilisation (analysis)</small><span id="rutil">-</span></div>
-      <div><small>context switches / s</small><span id="rsw">-</span></div>
-      <div><small>trace events / s</small><span id="rev">-</span></div>
-      <div><small>context switch, worst</small><span id="rctx">-</span></div>
-      <div><small>interrupt to task, worst</small><span id="risr">-</span></div>
-    </div>
-  </section>
-
-  <section class="card wide">
-    <h2>Tasks <button id="rreset" class="small">reset what-if</button></h2>
-    <div class="tablewrap"><table class="tasks">
-      <thead><tr>
-        <th>task</th><th>prio</th><th>T (ms)</th><th>D (ms)</th><th>C declared</th><th>C measured</th>
-        <th>C for analysis (&micro;s)</th><th>R measured</th><th>R computed</th><th>margin</th><th>misses</th><th>CPU</th><th>stack free</th>
-      </tr></thead>
-      <tbody id="rtasks"></tbody>
-    </table></div>
-    <p class="note">Measured values are worst cases since the STM32 reset. Edit priority, period or C to ask
-      "what if": the analysis below is recomputed here, the STM32 is not changed. R computed = C + interference of
-      higher-priority tasks (each with one context switch) + the ADC DMA interrupt, iterated until it stops moving.</p>
-  </section>
-
-  <section class="card wide">
-    <h2>Timeline
-      <select id="gwin"><option value="5">5 ms</option><option value="20" selected>20 ms</option><option value="50">50 ms</option><option value="100">100 ms</option></select>
-      <button id="gpause" class="small">Pause</button></h2>
-    <canvas id="gantt"></canvas>
-    <p class="note">Continuous trace of every context switch and ADC DMA interrupt (red), ticks on the time axis.
-      Highest priority at the top.</p>
-  </section>
-
-  <section class="card wide">
-    <h2>Doctor</h2>
-    <ul id="rfind" class="find"></ul>
-  </section>
-</main>
-
-<main id="events" class="view">
-  <section class="card wide">
-    <h2>Events</h2>
-    <ul id="log"></ul>
-  </section>
-</main>
-
-<script src="/uPlot.iife.min.js"></script>
-<script type="module" src="/app.js"></script>
+<footer class="foot">RTOS Doctor · probe on the target, analysis in your browser · <a href="https://github.com/yassinechouk/freertos-hil-motor-control">source</a></footer>
+<script src="vendor/uPlot.iife.min.js"></script>
+<script type="module" src="app.js"></script>
 </body>
 </html>

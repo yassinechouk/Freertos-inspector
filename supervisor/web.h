@@ -4,13 +4,14 @@
 #pragma once
 #include <Arduino.h>
 
-enum WebCmdKind : uint8_t { WEB_CMD_MODE, WEB_CMD_SETPOINT };
+enum WebCmdKind : uint8_t { WEB_CMD_MODE, WEB_CMD_SETPOINT, WEB_CMD_FAULT };
 
 struct WebCmd
 {
   WebCmdKind kind;
   uint8_t    mode;          /* WEB_CMD_MODE */
   float      rpm;           /* WEB_CMD_SETPOINT */
+  uint8_t    fault;         /* WEB_CMD_FAULT: HIL_FAULT_* */
 };
 
 void web_begin(bool portal);

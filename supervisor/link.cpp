@@ -41,6 +41,13 @@ void link_send_heartbeat()
   sendFrame(HIL_T_HEARTBEAT, pl, sizeof pl);
 }
 
+void link_send_fault(uint8_t fault)
+{
+  sendFrame(HIL_T_CMD_FAULT, &fault, 1);
+  cmdSentMs = millis();
+  cmdPending = true;
+}
+
 void link_send_mode(uint8_t mode)
 {
   sendFrame(HIL_T_CMD_MODE, &mode, 1);
@@ -91,6 +98,7 @@ static void handleFrame(const hil_frame_t &f)
     case HIL_T_TASK_TABLE: on_task_table(f.payload, f.len); break;
     case HIL_T_TASK_STATS: on_task_stats(f.payload, f.len); break;
     case HIL_T_RTOS_SYS:   on_rtos_sys(f.payload, f.len);   break;
+    case HIL_T_QUEUE_STATS: on_queue_stats(f.payload, f.len); break;
     case HIL_T_TRACE:      on_trace(f.payload, f.len);      break;
     default:
       break;                                   /* heartbeat: presence only */
@@ -158,6 +166,15 @@ const char *link_event_name(uint8_t code)
     case HIL_EVT_MODE_CHANGED:  return "MODE_CHANGED";
     case HIL_EVT_CMD_REJECTED:  return "CMD_REJECTED";
     case HIL_EVT_SP_TIMEOUT:    return "SP_TIMEOUT";
+    case HIL_EVT_DEADLINE_MISS: return "DEADLINE_MISS";
+    case HIL_EVT_PRIO_INHERIT:  return "PRIO_INHERIT";
+    case HIL_EVT_PRIO_RESTORE:  return "PRIO_RESTORE";
+    case HIL_EVT_QUEUE_FULL:    return "QUEUE_FULL";
+    case HIL_EVT_FAULT_INJECT:  return "FAULT_INJECTED";
+    case HIL_EVT_STACK_LOW:     return "STACK_LOW";
+    case HIL_EVT_CPU_HOG:       return "CPU_HOG";
+    case HIL_EVT_STARVED:       return "STARVED";
+    case HIL_EVT_HEAP_LOW:      return "HEAP_LOW";
     default:                    return "?";
   }
 }

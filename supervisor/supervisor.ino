@@ -62,10 +62,12 @@ void on_event(uint32_t t, uint8_t code, int32_t arg)
 void on_ack(uint8_t type, uint8_t status, int16_t value)
 {
   static const char *st[] = { "ok", "clamped", "rejected" };
-  const int k = (type == HIL_T_CMD_MODE) ? 0 : 1;
-  if (status == HIL_ACK_OK && value == lastAckValue[k]) return;     /* periodic refresh: stay quiet */
-  lastAckValue[k] = value;
-  const char *name = (type == HIL_T_CMD_MODE) ? "mode" : "sp";
+  const char *name = (type == HIL_T_CMD_MODE) ? "mode" : (type == HIL_T_CMD_FAULT) ? "fault" : "sp";
+  if (type != HIL_T_CMD_FAULT) {
+    const int k = (type == HIL_T_CMD_MODE) ? 0 : 1;
+    if (status == HIL_ACK_OK && value == lastAckValue[k]) return;   /* periodic refresh: stay quiet */
+    lastAckValue[k] = value;
+  }
   const char *s = status < 3 ? st[status] : "?";
   Serial.printf("[ACK] %s %s value=%d\n", name, s, (int)value);
   char j[96];
@@ -91,47 +93,71 @@ void on_stm32_restart()
   web_broadcast("{\"type\":\"info\",\"text\":\"STM32 restarted\"}");
 }
 
-/* ---- RTOS layer: configuration and statistics as JSON, trace as binary ------------------ */
+/* ---- RTOS probe: configuration and statistics as JSON, trace as binary ------------------ */
+
+/* Copies the ASCII name at the end of a payload, made safe for a JSON string. */
+static void copyName(const uint8_t *p, uint8_t from, uint8_t len, char *out, size_t size)
+{
+  size_t n = 0;
+  for (uint8_t i = from; i < len && n < size - 1; i++) {
+    const char c = (char)p[i];
+    out[n++] = (c >= 32 && c < 127 && c != '"' && c != '\\') ? c : '_';
+  }
+  out[n] = 0;
+}
 
 void on_task_table(const uint8_t *p, uint8_t len)
 {
-  if (len < 16) return;
-  char name[24];
-  uint8_t n = 0;
-  for (uint8_t i = 16; i < len && n < sizeof name - 1; i++) {
-    const char c = (char)p[i];
-    name[n++] = (c >= 32 && c < 127 && c != '"' && c != '\\') ? c : '_';   /* safe inside a JSON string */
-  }
-  name[n] = 0;
+  if (len < 12) return;
+  char name[32];
+  copyName(p, 12, len, name, sizeof name);
   char j[200];
   snprintf(j, sizeof j,
-           "{\"type\":\"task\",\"tag\":%u,\"prio\":%u,\"period\":%u,\"deadline\":%u,\"wcet\":%lu,\"stack\":%u,\"fcpu\":%lu,\"name\":\"%s\"}",
-           p[0], p[1], hil_get_u16(p + 2), hil_get_u16(p + 4), (unsigned long)hil_get_u32(p + 6),
-           hil_get_u16(p + 10), (unsigned long)hil_get_u32(p + 12), name);
+           "{\"type\":\"task\",\"tag\":%u,\"prio\":%u,\"stack\":%u,\"deadline\":%u,\"flags\":%u,\"fcpu\":%lu,\"name\":\"%s\"}",
+           p[0], p[1], hil_get_u16(p + 2), hil_get_u16(p + 4), p[6], (unsigned long)hil_get_u32(p + 8), name);
   web_broadcast(j);
 }
 
 void on_task_stats(const uint8_t *p, uint8_t len)
 {
-  if (len < 25) return;
-  char j[200];
+  if (len < 40) return;
+  char j[320];
   snprintf(j, sizeof j,
-           "{\"type\":\"tstat\",\"tag\":%u,\"cpu\":%u,\"jobs\":%u,\"cmax\":%lu,\"cavg\":%lu,\"rmax\":%lu,\"rmin\":%lu,\"miss\":%u,\"stack\":%u}",
-           p[0], hil_get_u16(p + 1), hil_get_u16(p + 3), (unsigned long)hil_get_u32(p + 5),
-           (unsigned long)hil_get_u32(p + 9), (unsigned long)hil_get_u32(p + 13),
-           (unsigned long)hil_get_u32(p + 17), hil_get_u16(p + 21), hil_get_u16(p + 23));
+           "{\"type\":\"tstat\",\"tag\":%u,\"state\":%u,\"prio\":%u,\"cpu\":%u,\"jobs\":%u,"
+           "\"cmax\":%lu,\"cavg\":%lu,\"rmax\":%lu,\"rmin\":%lu,\"tavg\":%lu,\"tmin\":%lu,\"tmax\":%lu,"
+           "\"miss\":%u,\"stack\":%u}",
+           p[0], p[1], p[2], hil_get_u16(p + 4), hil_get_u16(p + 6),
+           (unsigned long)hil_get_u32(p + 8), (unsigned long)hil_get_u32(p + 12),
+           (unsigned long)hil_get_u32(p + 16), (unsigned long)hil_get_u32(p + 20),
+           (unsigned long)hil_get_u32(p + 24), (unsigned long)hil_get_u32(p + 28),
+           (unsigned long)hil_get_u32(p + 32), hil_get_u16(p + 36), hil_get_u16(p + 38));
   web_broadcast(j);
 }
 
 void on_rtos_sys(const uint8_t *p, uint8_t len)
 {
-  if (len < 28) return;
-  char j[220];
+  if (len < 44) return;
+  char j[320];
   snprintf(j, sizeof j,
-           "{\"type\":\"rsys\",\"fcpu\":%lu,\"sw\":%lu,\"ev\":%lu,\"drop\":%lu,\"idle\":%u,\"tick\":%u,\"ctx\":%lu,\"isr\":%lu}",
+           "{\"type\":\"rsys\",\"fcpu\":%lu,\"sw\":%lu,\"ev\":%lu,\"drop\":%lu,\"idle\":%u,\"tick\":%u,"
+           "\"ctx\":%lu,\"isr\":%lu,\"probe\":%u,\"kernel\":%u,\"heapTotal\":%lu,\"heapFree\":%lu,\"heapMin\":%lu}",
            (unsigned long)hil_get_u32(p), (unsigned long)hil_get_u32(p + 4), (unsigned long)hil_get_u32(p + 8),
            (unsigned long)hil_get_u32(p + 12), hil_get_u16(p + 16), hil_get_u16(p + 18),
-           (unsigned long)hil_get_u32(p + 20), (unsigned long)hil_get_u32(p + 24));
+           (unsigned long)hil_get_u32(p + 20), (unsigned long)hil_get_u32(p + 24),
+           hil_get_u16(p + 28), hil_get_u16(p + 30), (unsigned long)hil_get_u32(p + 32),
+           (unsigned long)hil_get_u32(p + 36), (unsigned long)hil_get_u32(p + 40));
+  web_broadcast(j);
+}
+
+void on_queue_stats(const uint8_t *p, uint8_t len)
+{
+  if (len < 12) return;
+  char name[24];
+  copyName(p, 12, len, name, sizeof name);
+  char j[200];
+  snprintf(j, sizeof j,
+           "{\"type\":\"qstat\",\"qid\":%u,\"len\":%u,\"wait\":%u,\"max\":%u,\"fail\":%lu,\"name\":\"%s\"}",
+           p[0], hil_get_u16(p + 2), hil_get_u16(p + 4), hil_get_u16(p + 6), (unsigned long)hil_get_u32(p + 8), name);
   web_broadcast(j);
 }
 
@@ -234,6 +260,15 @@ static void handleConsoleLine(char *line)
   if (*p == '\0') return;
 
   if (!strncmp(p, "wifi reset", 10)) { net_forget_and_restart(); return; }
+  if (!strncmp(p, "fault", 5)) {                         /* fault hog|stack|queue|inversion|heap */
+    p += 5;
+    while (*p == ' ') p++;
+    const uint8_t f = !strncmp(p, "hog", 3) ? HIL_FAULT_CPU_HOG : !strncmp(p, "stack", 5) ? HIL_FAULT_STACK
+                    : !strncmp(p, "queue", 5) ? HIL_FAULT_QUEUE : !strncmp(p, "inversion", 9) ? HIL_FAULT_INVERSION
+                    : !strncmp(p, "heap", 4) ? HIL_FAULT_HEAP : 0;
+    if (f) link_send_fault(f); else Serial.println("faults: hog stack queue inversion heap");
+    return;
+  }
   if (!strncmp(p, "stat", 4))        { printStats(); return; }
   if (!strncmp(p, "mode", 4)) p += 4;
   while (*p == ' ') p++;
@@ -244,7 +279,7 @@ static void handleConsoleLine(char *line)
   else if (!strncmp(p, "remote", 6)) commandMode(HIL_MODE_REMOTE);
   else if (!strncmp(p, "test", 4))   commandMode(HIL_MODE_TEST);
   else if (!strncmp(p, "sp", 2) && sscanf(p + 2, "%f", &v) == 1) commandSetpoint(v, SRC_CONSOLE);
-  else Serial.println("commands: mode idle|local|remote|test, sp <rpm>, stat, wifi reset, wifi set <ssid> <password>");
+  else Serial.println("commands: mode idle|local|remote|test, sp <rpm>, fault <name>, stat, wifi reset, wifi set <ssid> <password>");
 }
 
 static void pollConsole()
@@ -265,6 +300,11 @@ static void pollWeb()
 {
   WebCmd c;
   while (web_next_command(&c)) {
+    if (c.kind == WEB_CMD_FAULT) {
+      Serial.printf("[CMD] inject fault %u\n", c.fault);
+      link_send_fault(c.fault);
+      continue;
+    }
     if (c.kind == WEB_CMD_MODE) commandMode(c.mode);
     else                        commandSetpoint(c.rpm, SRC_WEB);
   }
@@ -334,7 +374,7 @@ void setup()
   link_begin();
   const bool station = net_begin();
   web_begin(!station);
-  Serial.println("supervisor ready. commands: mode idle|local|remote|test, sp <rpm>, stat, wifi reset, wifi set <ssid> <password>");
+  Serial.println("supervisor ready. commands: mode idle|local|remote|test, sp <rpm>, fault <name>, stat, wifi reset, wifi set <ssid> <password>");
 }
 
 void loop()

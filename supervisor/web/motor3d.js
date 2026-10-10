@@ -1,5 +1,5 @@
 // 3D view of the motor (Three.js). The rotor turns at the MEASURED speed, slowed down for display.
-import * as THREE from '/three.module.min.js';
+import * as THREE from './vendor/three.module.min.js';
 
 // A 60 Hz screen samples the rotor 60 times per second. Above 30 rev/s (half the frame rate, the
 // Nyquist limit) the wheel seems to stop or turn backwards, and beyond a few rev/s it is a blur.

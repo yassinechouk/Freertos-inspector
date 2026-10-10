@@ -135,6 +135,14 @@ static void parseCommand(const char *s)
     else if (!strncmp(v, "remote", 6)) c.mode = HIL_MODE_REMOTE;
     else if (!strncmp(v, "test", 4))   c.mode = HIL_MODE_TEST;
     else return;
+  } else if (strstr(s, "\"cmd\":\"fault\"") != nullptr) {
+    c.kind = WEB_CMD_FAULT;
+    if      (!strncmp(v, "hog", 3))       c.fault = HIL_FAULT_CPU_HOG;
+    else if (!strncmp(v, "stack", 5))     c.fault = HIL_FAULT_STACK;
+    else if (!strncmp(v, "queue", 5))     c.fault = HIL_FAULT_QUEUE;
+    else if (!strncmp(v, "inversion", 9)) c.fault = HIL_FAULT_INVERSION;
+    else if (!strncmp(v, "heap", 4))      c.fault = HIL_FAULT_HEAP;
+    else return;
   } else if (strstr(s, "\"cmd\":\"sp\"") != nullptr) {
     c.kind = WEB_CMD_SETPOINT;
     c.rpm = strtof(v, nullptr);
@@ -237,7 +245,7 @@ void web_begin(bool isPortal)
 
   httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
   cfg.max_open_sockets = 7;
-  cfg.max_uri_handlers = 16;
+  cfg.max_uri_handlers = 40;                       /* one per embedded file */
   cfg.lru_purge_enable = true;
   cfg.uri_match_fn = httpd_uri_match_wildcard;
   if (httpd_start(&server, &cfg) != ESP_OK) {
