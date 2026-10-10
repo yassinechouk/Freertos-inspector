@@ -24,6 +24,7 @@
 /* USER CODE BEGIN Includes */
 #include "FreeRTOS.h"
 #include "task.h"
+#include "hil_proto.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -91,6 +92,7 @@ typedef struct
   float    duty;                /* output, 0..1                                */
   uint32_t ticks;               /* control steps since start                   */
   uint32_t saturated;           /* steps where the output was clamped          */
+  float    spRamp;              /* setpoint after the slew-rate limiter        */
   uint32_t stallMs;             /* consecutive ms of "driven hard, not moving" */
   uint32_t fault;               /* 0 = none, latched until reset (CTL_FAULT_*) */
 } CtlState_t;
@@ -111,15 +113,33 @@ typedef struct
   float    finalRpm;            /* mean over the last 32 samples               */
 } CtlRec_t;
 
-/* Supervisor link (USART1, TX by DMA). Observe-only: nothing received from the
-   supervisor ever reaches the control loop. */
+/* Supervisor link (USART1, hil_proto.h frames, DMA both ways). The supervisor
+   may only PROPOSE: modes and setpoints go through the checks in link_handle_frame()
+   and the slew limiter in ctl_setpoint(); the control loop never waits for it. */
 typedef struct
 {
-  uint32_t sent;                /* lines handed to the DMA                     */
-  uint32_t busy;                /* previous line still on the wire: skipped    */
+  uint32_t sent;                /* TX cycles handed to the DMA                 */
+  uint32_t busy;                /* previous transfer still running: skipped    */
   uint32_t timeouts;            /* DMA transfer-complete not seen in time      */
   uint32_t errors;              /* UART error callbacks                        */
+  uint32_t rxFrames;            /* valid frames received                       */
+  uint32_t rxCrcErrors;         /* frames rejected by the CRC                  */
+  uint32_t rxLost;              /* frames missing, from the sequence numbers   */
+  uint32_t rxRestarts;          /* RX DMA found stopped (UART error): restarted */
+  uint32_t cmdRejected;         /* commands refused                            */
 } LinkStats_t;
+
+/* Control mode and remote setpoint, written by the link task, read by the control loop. */
+typedef struct
+{
+  uint32_t mode;                /* HIL_MODE_*; IDLE after reset                */
+  int32_t  remoteRpm10;         /* requested speed in REMOTE, already clamped  */
+  uint32_t lastRxMs;            /* g_acq.blocks at the last valid frame        */
+  uint32_t linkAlive;           /* 1 while frames from the supervisor arrive   */
+  uint32_t modeSinceMs;         /* when the current mode was entered           */
+  uint32_t evtPending;          /* bit n set: event code n is to be reported   */
+  int32_t  evtArg[8];
+} CtlCmd_t;
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -182,11 +202,19 @@ _Static_assert(ENC_WIN == sizeof(((EncStats_t *)0)->winD) / sizeof(int32_t),
 _Static_assert(REC_LEN == sizeof(((CtlRec_t *)0)->sp) / sizeof(int16_t),
                "CtlRec_t arrays must have REC_LEN entries");
 
-/* Supervisor link: one text line every LINK_PERIOD_MS, sent by DMA from a task
-   below every control task. About 40 bytes = 3.5 ms on the wire at 115200. */
-#define LINK_PERIOD_MS        100U
+/* Supervisor link: one TX cycle every LINK_PERIOD_MS (telemetry every cycle,
+   heartbeat every LINK_HEARTBEAT_DIV cycles), sent by DMA from a task below every
+   control task. RX is a circular DMA buffer polled by the same task. */
+#define LINK_PERIOD_MS        10U
 #define LINK_PRIORITY         10U   /* above the health task, below all control tasks */
-#define LINK_BUF_LEN          64U
+#define LINK_BUF_LEN          160U
+#define LINK_RX_LEN           256U
+#define LINK_HEARTBEAT_DIV    10U
+#define LINK_DEADMAN_MS       1000U /* REMOTE: no frame for this long -> setpoint ramps to 0 */
+#define LINK_MAX_EVENTS       2U    /* events per TX cycle, to bound the buffer */
+#define CTL_DEFAULT_MODE      HIL_MODE_IDLE   /* HIL_MODE_TEST for a bench without supervisor */
+#define CTL_RPM_MAX           3000.0f
+#define CTL_SLEW_RPM_PER_MS   3.0f          /* 3000 rpm/s on LOCAL and REMOTE setpoints */
 
 /* Fail-stop self-test, run from the acquisition task 5 s after start.
    0 = off (reference build), 1 = call the CSS callback, 2 = call Error_Handler,
@@ -210,6 +238,7 @@ TIM_HandleTypeDef htim3;
 
 UART_HandleTypeDef huart1;
 DMA_HandleTypeDef hdma_usart1_tx;
+DMA_HandleTypeDef hdma_usart1_rx;
 
 /* Definitions for healthTask */
 osThreadId_t healthTaskHandle;
@@ -249,6 +278,11 @@ static StaticTask_t link_TCB;
 static StackType_t  link_Stack[TASK_STACK_WORDS];
 static TaskHandle_t hLink = NULL;
 static uint8_t      linkBuf[LINK_BUF_LEN];   /* read by the DMA during a transfer */
+static uint8_t      rxBuf[LINK_RX_LEN];      /* written by the DMA (circular)    */
+static uint32_t     rxRd;                    /* read index into rxBuf            */
+static hil_parser_t rxParser;
+static hil_seq_t    rxSeq;
+static uint8_t      txSeq;
 
 /* Globals (not static) so they are easy to watch in Live Expressions */
 volatile HealthStatus_t g_health;
@@ -263,6 +297,7 @@ volatile EncStats_t     g_enc = { .warmup = 10U, .dmin = INT32_MAX, .dmax = INT3
 volatile CtlState_t     g_ctl;
 volatile CtlRec_t       g_rec;
 volatile LinkStats_t    g_link;
+volatile CtlCmd_t       g_cmd = { .mode = CTL_DEFAULT_MODE };
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -411,12 +446,45 @@ static void enc_update(uint32_t cyc, uint32_t cnt)
   }
 }
 
-/* Software setpoint: 0 during CTL_HOLD_MS after reset (the motor never starts
-   by itself), then a square wave between CTL_STEP_RPM and 0. */
+/* Setpoint of the current mode, then limited in slew rate (except in TEST, which
+   must be a clean step). TEST: 0 for CTL_HOLD_MS after entering the mode, then a
+   square wave between CTL_STEP_RPM and 0. REMOTE: the speed requested by the
+   supervisor, forced to 0 when it has been silent for LINK_DEADMAN_MS. */
 static float ctl_setpoint(uint32_t ms)
 {
-  if (ms < CTL_HOLD_MS) { return 0.0f; }
-  return ((((ms - CTL_HOLD_MS) / CTL_HALF_PERIOD_MS) & 1U) == 0U) ? CTL_STEP_RPM : 0.0f;
+  float target = 0.0f;                           /* IDLE */
+
+  switch (g_cmd.mode)
+  {
+    case HIL_MODE_LOCAL:
+      target = (float)g_acq.lastRaw * (CTL_RPM_MAX / 4095.0f);
+      break;
+    case HIL_MODE_REMOTE:
+      if ((ms - g_cmd.lastRxMs) <= LINK_DEADMAN_MS)
+      {
+        target = (float)g_cmd.remoteRpm10 * 0.1f;
+      }
+      break;
+    case HIL_MODE_TEST:
+    {
+      const uint32_t t = ms - g_cmd.modeSinceMs;
+      if (t >= CTL_HOLD_MS)
+      {
+        target = ((((t - CTL_HOLD_MS) / CTL_HALF_PERIOD_MS) & 1U) == 0U) ? CTL_STEP_RPM : 0.0f;
+      }
+      g_ctl.spRamp = target;
+      return target;
+    }
+    default:
+      break;
+  }
+
+  float sp = g_ctl.spRamp;
+  if (target > sp + CTL_SLEW_RPM_PER_MS)      { sp += CTL_SLEW_RPM_PER_MS; }
+  else if (target < sp - CTL_SLEW_RPM_PER_MS) { sp -= CTL_SLEW_RPM_PER_MS; }
+  else                                        { sp = target; }
+  g_ctl.spRamp = sp;
+  return sp;
 }
 
 /* Step-response figures of the recording, computed once on the target. */
@@ -501,6 +569,7 @@ static void ctl_update(uint32_t ms)
   if (g_ctl.stallMs >= CTL_STALL_MS)
   {
     g_ctl.fault = CTL_FAULT_STALL;
+    g_cmd.evtPending |= (1UL << HIL_EVT_STALL);
     Safe_State();                            /* MOE off, PA9 low, LD2 on: no reset of the CPU */
     u = 0.0f;
   }
@@ -513,8 +582,8 @@ static void ctl_update(uint32_t ms)
   g_ctl.duty  = u;
   g_ctl.ticks++;
 
-  /* One-shot capture, starting at the first sample where the setpoint is non-zero. */
-  if ((g_rec.done == 0U) && (sp > 0.0f) && (g_rec.n < REC_LEN))
+  /* One-shot capture in TEST mode, starting at the first sample where the setpoint is non-zero. */
+  if ((g_rec.done == 0U) && (g_cmd.mode == HIL_MODE_TEST) && (sp > 0.0f) && (g_rec.n < REC_LEN))
   {
     int32_t r10 = g_enc.rpm10;
     if (r10 > 32767) { r10 = 32767; }
@@ -527,38 +596,191 @@ static void ctl_update(uint32_t ms)
   }
 }
 
-/* Text formatting by hand: no printf/snprintf from a task (project rule). */
-static char *put_str(char *p, const char *s)
+/* ---- Supervisor link: frames from hil_proto.h, no printf (project rule) ---- */
+
+static int16_t sat_i16(float v)
 {
-  while (*s != '\0') { *p++ = *s++; }
-  return p;
+  if (v > 32767.0f)  { return 32767; }
+  if (v < -32768.0f) { return -32768; }
+  return (int16_t)v;
 }
 
-static char *put_i32(char *p, int32_t v)
+static uint32_t link_add(uint32_t n, uint8_t type, const uint8_t *payload, uint8_t len)
 {
-  char tmp[11];
-  uint32_t n = 0U;
-  uint32_t u;
-
-  if (v < 0) { *p++ = '-'; u = (uint32_t)(-(v + 1)) + 1U; }
-  else       { u = (uint32_t)v; }
-
-  do { tmp[n++] = (char)('0' + (u % 10U)); u /= 10U; } while (u != 0U);
-  while (n > 0U) { *p++ = tmp[--n]; }
-  return p;
+  return n + (uint32_t)hil_encode(&linkBuf[n], type, txSeq++, payload, len);
 }
 
-/* "t=<ms> sp=<rpm> rpm10=<0.1 rpm> duty=<per mille> fault=<code>\r\n" */
-static uint32_t link_format(uint8_t *buf)
+static uint32_t link_add_telemetry(uint32_t n)
 {
-  char *p = (char *)buf;
-  p = put_str(p, "t=");      p = put_i32(p, (int32_t)g_acq.blocks);
-  p = put_str(p, " sp=");    p = put_i32(p, (int32_t)g_ctl.spRpm);
-  p = put_str(p, " rpm10="); p = put_i32(p, g_enc.rpm10);
-  p = put_str(p, " duty=");  p = put_i32(p, (int32_t)(g_ctl.duty * 1000.0f));
-  p = put_str(p, " fault="); p = put_i32(p, (int32_t)g_ctl.fault);
-  p = put_str(p, "\r\n");
-  return (uint32_t)((uint8_t *)p - buf);
+  uint8_t pl[12];
+  hil_put_u32(&pl[0], g_acq.blocks);
+  hil_put_u16(&pl[4], (uint16_t)sat_i16(g_ctl.spRpm * 10.0f));
+  hil_put_u16(&pl[6], (uint16_t)sat_i16((float)g_enc.rpm10));
+  hil_put_u16(&pl[8], (uint16_t)(g_ctl.duty * 1000.0f));
+  pl[10] = (uint8_t)g_ctl.fault;
+  pl[11] = (uint8_t)g_cmd.mode;
+  return link_add(n, HIL_T_TELEMETRY, pl, (uint8_t)sizeof pl);
+}
+
+static uint32_t link_add_heartbeat(uint32_t n)
+{
+  uint8_t pl[6];
+  hil_put_u32(&pl[0], g_acq.blocks);
+  pl[4] = (uint8_t)g_ctl.fault;
+  pl[5] = (uint8_t)g_cmd.mode;
+  return link_add(n, HIL_T_HEARTBEAT, pl, (uint8_t)sizeof pl);
+}
+
+/* Pending events, lowest code first, at most LINK_MAX_EVENTS per cycle. */
+static uint32_t link_add_events(uint32_t n)
+{
+  uint32_t sent = 0U;
+  for (uint32_t code = 1U; (code < 8U) && (sent < LINK_MAX_EVENTS); code++)
+  {
+    if ((g_cmd.evtPending & (1UL << code)) != 0U)
+    {
+      uint8_t pl[9];
+      hil_put_u32(&pl[0], g_acq.blocks);
+      pl[4] = (uint8_t)code;
+      hil_put_u32(&pl[5], (uint32_t)g_cmd.evtArg[code]);
+      g_cmd.evtPending &= ~(1UL << code);
+      n = link_add(n, HIL_T_EVENT, pl, (uint8_t)sizeof pl);
+      sent++;
+    }
+  }
+  return n;
+}
+
+/* Acknowledgements waiting to be sent (filled while handling received commands). */
+#define ACK_QUEUE 4U
+static struct { uint8_t type, status; int16_t value; } ackQ[ACK_QUEUE];
+static uint32_t ackN;
+
+static void ack_push(uint8_t type, uint8_t status, int16_t value)
+{
+  if (ackN < ACK_QUEUE)
+  {
+    ackQ[ackN].type = type; ackQ[ackN].status = status; ackQ[ackN].value = value;
+    ackN++;
+  }
+}
+
+static uint32_t link_add_acks(uint32_t n)
+{
+  for (uint32_t i = 0U; i < ackN; i++)
+  {
+    uint8_t pl[4];
+    pl[0] = ackQ[i].type;
+    pl[1] = ackQ[i].status;
+    hil_put_u16(&pl[2], (uint16_t)ackQ[i].value);
+    n = link_add(n, HIL_T_ACK, pl, (uint8_t)sizeof pl);
+  }
+  ackN = 0U;
+  return n;
+}
+
+static void link_event(uint32_t code, int32_t arg)
+{
+  g_cmd.evtArg[code] = arg;
+  g_cmd.evtPending |= (1UL << code);
+}
+
+/* The only place where the supervisor can influence the controller. */
+static void link_set_mode(uint32_t mode)
+{
+  if (mode == g_cmd.mode) { return; }
+  if (mode == HIL_MODE_REMOTE) { g_cmd.remoteRpm10 = 0; }         /* nothing requested yet: stay at 0 */
+  if (mode == HIL_MODE_TEST)   { g_rec.n = 0U; g_rec.done = 0U; } /* re-arm the step recording */
+  g_cmd.modeSinceMs = g_acq.blocks;
+  g_cmd.mode = mode;
+  link_event(HIL_EVT_MODE_CHANGED, (int32_t)mode);
+}
+
+static void link_handle_frame(const hil_frame_t *f)
+{
+  switch (f->type)
+  {
+    case HIL_T_HEARTBEAT:
+      break;                                                       /* keep-alive only */
+
+    case HIL_T_CMD_SETPOINT:
+      if (f->len == 2U)
+      {
+        int32_t v = hil_get_i16(f->payload);
+        uint8_t status = HIL_ACK_OK;
+        const int32_t vmax = (int32_t)(CTL_RPM_MAX * 10.0f);
+        if (v < 0)    { v = 0;    status = HIL_ACK_CLAMPED; }
+        if (v > vmax) { v = vmax; status = HIL_ACK_CLAMPED; }
+        g_cmd.remoteRpm10 = v;
+        ack_push(HIL_T_CMD_SETPOINT, status, (int16_t)v);
+        break;
+      }
+      g_link.cmdRejected++;
+      ack_push(HIL_T_CMD_SETPOINT, HIL_ACK_REJECTED, 0);
+      link_event(HIL_EVT_CMD_REJECTED, f->type);
+      break;
+
+    case HIL_T_CMD_MODE:
+      if ((f->len == 1U) && (f->payload[0] <= HIL_MODE_TEST))
+      {
+        link_set_mode(f->payload[0]);
+        ack_push(HIL_T_CMD_MODE, HIL_ACK_OK, (int16_t)f->payload[0]);
+        break;
+      }
+      g_link.cmdRejected++;
+      ack_push(HIL_T_CMD_MODE, HIL_ACK_REJECTED, 0);
+      link_event(HIL_EVT_CMD_REJECTED, f->type);
+      break;
+
+    default:
+      g_link.cmdRejected++;
+      link_event(HIL_EVT_CMD_REJECTED, f->type);
+      break;
+  }
+}
+
+/* Drains the circular RX DMA buffer into the parser. */
+static void link_rx_poll(void)
+{
+  if (huart1.RxState == HAL_UART_STATE_READY)                      /* DMA stopped by a UART error: restart */
+  {
+    rxRd = 0U;
+    if (HAL_UART_Receive_DMA(&huart1, rxBuf, LINK_RX_LEN) == HAL_OK) { g_link.rxRestarts++; }
+    return;
+  }
+
+  const uint32_t wr = LINK_RX_LEN - __HAL_DMA_GET_COUNTER(&hdma_usart1_rx);
+  hil_frame_t f;
+  while (rxRd != wr)
+  {
+    hil_parser_push(&rxParser, rxBuf[rxRd]);
+    rxRd = (rxRd + 1U) % LINK_RX_LEN;
+    while (hil_parser_next(&rxParser, &f) != 0)
+    {
+      hil_seq_update(&rxSeq, f.seq);
+      g_cmd.lastRxMs = g_acq.blocks;
+      link_handle_frame(&f);
+    }
+  }
+  g_link.rxFrames    = rxParser.framesOk;
+  g_link.rxCrcErrors = rxParser.crcErrors;
+  g_link.rxLost      = rxSeq.lost;
+}
+
+/* Supervisor silent for LINK_DEADMAN_MS: report it (REMOTE falls back to 0 by itself). */
+static void link_supervise(void)
+{
+  const uint32_t silent = g_acq.blocks - g_cmd.lastRxMs;
+  if ((g_cmd.linkAlive != 0U) && (silent > LINK_DEADMAN_MS))
+  {
+    g_cmd.linkAlive = 0U;
+    link_event(HIL_EVT_LINK_LOST, 0);
+  }
+  else if ((g_cmd.linkAlive == 0U) && (g_link.rxFrames != 0U) && (silent <= LINK_DEADMAN_MS))
+  {
+    g_cmd.linkAlive = 1U;
+    link_event(HIL_EVT_LINK_RESTORED, 0);
+  }
 }
 
 /* Lowest-priority real-time job: it may be late, it must never delay control. */
@@ -567,17 +789,30 @@ static void LinkTask(void *arg)
   (void)arg;
   const TickType_t period = pdMS_TO_TICKS(LINK_PERIOD_MS);
   TickType_t lastWake = xTaskGetTickCount();
+  uint32_t hbDiv = 0U;
+
+  hil_parser_init(&rxParser);
+  hil_seq_init(&rxSeq);
+  rxRd = 0U;
+  (void)HAL_UART_Receive_DMA(&huart1, rxBuf, LINK_RX_LEN);
 
   for (;;)
   {
     vTaskDelayUntil(&lastWake, period);
 
+    link_rx_poll();
+    link_supervise();
+
+    uint32_t n = link_add_telemetry(0U);
+    if (++hbDiv >= LINK_HEARTBEAT_DIV) { hbDiv = 0U; n = link_add_heartbeat(n); }
+    n = link_add_acks(n);
+    n = link_add_events(n);
+
     (void)ulTaskNotifyTake(pdTRUE, 0U);                 /* drop a stale completion */
-    const uint32_t n = link_format(linkBuf);
     if (HAL_UART_Transmit_DMA(&huart1, linkBuf, (uint16_t)n) == HAL_OK)
     {
       g_link.sent++;
-      if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(20U)) == 0U)
+      if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(5U)) == 0U)
       {
         g_link.timeouts++;
       }
@@ -1113,7 +1348,7 @@ static void MX_USART1_UART_Init(void)
 
   /* USER CODE END USART1_Init 1 */
   huart1.Instance = USART1;
-  huart1.Init.BaudRate = 115200;
+  huart1.Init.BaudRate = 921600;
   huart1.Init.WordLength = UART_WORDLENGTH_8B;
   huart1.Init.StopBits = UART_STOPBITS_1;
   huart1.Init.Parity = UART_PARITY_NONE;
@@ -1148,6 +1383,9 @@ static void MX_DMA_Init(void)
   /* DMA1_Channel4_IRQn interrupt configuration */
   HAL_NVIC_SetPriority(DMA1_Channel4_IRQn, 7, 0);
   HAL_NVIC_EnableIRQ(DMA1_Channel4_IRQn);
+  /* DMA1_Channel5_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Channel5_IRQn, 7, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Channel5_IRQn);
 
 }
 
