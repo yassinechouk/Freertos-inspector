@@ -81,6 +81,33 @@ typedef struct
   uint32_t sumDc;               /* sum of winDc                                */
   int32_t  rpm10;               /* speed in 0.1 rpm, signed (sign = direction) */
 } EncStats_t;
+
+/* Speed control loop (PI, 1 kHz, single-precision float on the FPU). */
+typedef struct
+{
+  float    spRpm;               /* setpoint                                    */
+  float    rpm;                 /* measured speed                              */
+  float    integ;               /* integral term, in duty units (0..1)         */
+  float    duty;                /* output, 0..1                                */
+  uint32_t ticks;               /* control steps since start                   */
+  uint32_t saturated;           /* steps where the output was clamped          */
+} CtlState_t;
+
+/* One-shot recording of the first setpoint step: 1 sample per ms. Results are
+   computed on the target right after the capture, so they can be read in Live
+   Expressions and compared with the offline simulation. */
+typedef struct
+{
+  int16_t  sp[256 * 2];         /* setpoint, rpm (REC_LEN entries)             */
+  int16_t  rpm10[256 * 2];      /* measured speed, 0.1 rpm                     */
+  uint16_t duty[256 * 2];       /* TIM1 compare value, 0..4000                 */
+  uint32_t n;                   /* samples recorded so far                     */
+  uint32_t done;                /* 1 when the capture is complete              */
+  float    riseMs;              /* 10 % -> 90 % of the final value             */
+  float    overshootPct;        /* peak above the target, in % (<= 0: none)    */
+  float    settleMs;            /* time after which the speed stays within 2 % */
+  float    finalRpm;            /* mean over the last 32 samples               */
+} CtlRec_t;
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -116,11 +143,21 @@ typedef struct
 #define ENC_LINES             500U
 #define ENC_WIN               16U
 
-/* TEMPORARY open-loop test of the ESP32 motor model: fixed PWM duty on PA9.
-   TIM1 period is 4000 ticks, so 2000 = 50 %. Set back to 0 for the reference build. */
-#define MOTOR_TEST_DUTY_TICKS 2000U
 _Static_assert(ENC_WIN == sizeof(((EncStats_t *)0)->winD) / sizeof(int32_t),
                "EncStats_t.winD/winDc size must match ENC_WIN");
+
+/* Speed control (phase 4). Gains from the offline simulation (plant gain
+   K = 3000 rpm per 100 % duty, time constant 100 ms; zero cancels the pole,
+   Ti = tau, closed loop about 3 times faster than the motor). */
+#define CTL_KP                0.001f    /* duty per rpm                       */
+#define CTL_KI                0.010f    /* duty per (rpm * s)                 */
+#define CTL_DT_S              0.001f    /* one control step per 1 ms block    */
+#define CTL_STEP_RPM          1500.0f   /* software setpoint: square wave     */
+#define CTL_HOLD_MS           1000U     /* setpoint 0 after reset: safe start */
+#define CTL_HALF_PERIOD_MS    2000U     /* 2 s at the setpoint, 2 s at 0      */
+#define REC_LEN               512U
+_Static_assert(REC_LEN == sizeof(((CtlRec_t *)0)->sp) / sizeof(int16_t),
+               "CtlRec_t arrays must have REC_LEN entries");
 
 /* Fail-stop self-test, run from the acquisition task 5 s after start.
    0 = off (reference build), 1 = call the CSS callback, 2 = call Error_Handler,
@@ -186,6 +223,8 @@ volatile CycleStats_t   g_isrToTask = { .min = UINT32_MAX };
 volatile uint32_t       g_isrT0;      /* timestamp written by the DMA ISR */
 
 volatile EncStats_t     g_enc = { .warmup = 10U, .dmin = INT32_MAX, .dmax = INT32_MIN };
+volatile CtlState_t     g_ctl;
+volatile CtlRec_t       g_rec;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -333,6 +372,95 @@ static void enc_update(uint32_t cyc, uint32_t cnt)
   }
 }
 
+/* Software setpoint: 0 during CTL_HOLD_MS after reset (the motor never starts
+   by itself), then a square wave between CTL_STEP_RPM and 0. */
+static float ctl_setpoint(uint32_t ms)
+{
+  if (ms < CTL_HOLD_MS) { return 0.0f; }
+  return ((((ms - CTL_HOLD_MS) / CTL_HALF_PERIOD_MS) & 1U) == 0U) ? CTL_STEP_RPM : 0.0f;
+}
+
+/* Step-response figures of the recording, computed once on the target. */
+static void rec_analyse(void)
+{
+  uint32_t i10 = 0U, i90 = 0U, settle = 0U;
+  uint32_t found10 = 0U, found90 = 0U;
+  float peak = 0.0f, tail = 0.0f;
+
+  for (uint32_t i = 0U; i < REC_LEN; i++)
+  {
+    const float r = (float)g_rec.rpm10[i] * 0.1f;
+    if ((found10 == 0U) && (r > 0.1f * CTL_STEP_RPM)) { i10 = i; found10 = 1U; }
+    if ((found90 == 0U) && (r > 0.9f * CTL_STEP_RPM)) { i90 = i; found90 = 1U; }
+    if (r > peak) { peak = r; }
+
+    float err = r - CTL_STEP_RPM;
+    if (err < 0.0f) { err = -err; }
+    if (err > 0.02f * CTL_STEP_RPM) { settle = i + 1U; }
+    if (i >= (REC_LEN - 32U)) { tail += r; }
+  }
+
+  g_rec.riseMs       = (found90 != 0U) ? (float)(i90 - i10) : -1.0f;
+  g_rec.overshootPct = (peak / CTL_STEP_RPM - 1.0f) * 100.0f;
+  g_rec.settleMs     = (float)settle;
+  g_rec.finalRpm     = tail / 32.0f;
+  g_rec.done         = 1U;
+}
+
+/* One PI step per 1 ms block, right after enc_update(). Anti-windup by
+   conditional integration: the integral stops growing while the output is
+   clamped and the error would push it further into the clamp. */
+static void ctl_update(uint32_t ms)
+{
+  const float sp  = ctl_setpoint(ms);
+  const float rpm = (float)g_enc.rpm10 * 0.1f;
+  float u = 0.0f;
+
+  if (g_enc.winN == ENC_WIN)                 /* speed estimate fully valid */
+  {
+    const float e    = sp - rpm;
+    const float uRaw = CTL_KP * e + g_ctl.integ;
+
+    u = uRaw;
+    if (u > 1.0f)      { u = 1.0f; }
+    else if (u < 0.0f) { u = 0.0f; }
+
+    if ((u == uRaw) || ((uRaw > 1.0f) && (e < 0.0f)) || ((uRaw < 0.0f) && (e > 0.0f)))
+    {
+      g_ctl.integ += CTL_KI * e * CTL_DT_S;
+    }
+    else
+    {
+      g_ctl.saturated++;
+    }
+  }
+  else
+  {
+    g_ctl.integ = 0.0f;                      /* no valid measurement: output stays 0 */
+  }
+
+  const uint32_t cmp = (uint32_t)(u * (float)(__HAL_TIM_GET_AUTORELOAD(&htim1) + 1U));
+  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, cmp);
+
+  g_ctl.spRpm = sp;
+  g_ctl.rpm   = rpm;
+  g_ctl.duty  = u;
+  g_ctl.ticks++;
+
+  /* One-shot capture, starting at the first sample where the setpoint is non-zero. */
+  if ((g_rec.done == 0U) && (sp > 0.0f) && (g_rec.n < REC_LEN))
+  {
+    int32_t r10 = g_enc.rpm10;
+    if (r10 > 32767) { r10 = 32767; }
+    if (r10 < -32768) { r10 = -32768; }
+    g_rec.sp[g_rec.n]    = (int16_t)sp;
+    g_rec.rpm10[g_rec.n] = (int16_t)r10;
+    g_rec.duty[g_rec.n]  = (uint16_t)cmp;
+    g_rec.n++;
+    if (g_rec.n == REC_LEN) { rec_analyse(); }
+  }
+}
+
 /* Acquisition task: woken by the DMA half/full-transfer interrupt.
    It starts the hardware itself, so that no interrupt can ever try to
    notify a task that does not exist yet. */
@@ -346,9 +474,9 @@ static void AcqTask(void *arg)
   __HAL_DBGMCU_FREEZE_TIM1();
   __HAL_DBGMCU_FREEZE_TIM2();   /* keeps encoder counts consistent with DWT, which also stops */
 
-  /* Motor PWM: start at MOTOR_TEST_DUTY_TICKS (0 = 0 %). HAL_TIM_PWM_Start
-     also sets MOE, the main output enable of the advanced timer. */
-  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, MOTOR_TEST_DUTY_TICKS);
+  /* Motor PWM: start at 0 % duty. HAL_TIM_PWM_Start also sets MOE,
+     the main output enable of the advanced timer. */
+  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, 0U);
   if (HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_2) != HAL_OK)
   {
     Error_Handler();
@@ -424,13 +552,9 @@ static void AcqTask(void *arg)
     g_acq.lastMv  = (avg * 3300U) / 4095U;
     g_acq.blocks++;
 
-#if MOTOR_TEST_DUTY_TICKS == 0U
-    /* Temporary open loop (phase 2 test): setpoint 0..4095 -> duty 0..3999.
-       Replaced by the PI controller output in phase 4. With a fixed test duty
-       (MOTOR_TEST_DUTY_TICKS != 0) the pot is ignored. */
-    const uint32_t duty = (avg * (__HAL_TIM_GET_AUTORELOAD(&htim1) + 1U)) / 4096U;
-    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, duty);
-#endif
+    /* The pot (g_acq.lastRaw) is still sampled but no longer drives the motor:
+       the setpoint is a software square wave for now (see ctl_setpoint). */
+    ctl_update(g_acq.blocks);
 
     HAL_GPIO_WritePin(TP_TASK_C_GPIO_Port, TP_TASK_C_Pin, GPIO_PIN_RESET);
   }
