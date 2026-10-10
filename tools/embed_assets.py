@@ -1,7 +1,8 @@
-"""Embeds the dashboard files (supervisor/web) into supervisor/assets.h, gzip-compressed.
+"""Embeds the dashboard (supervisor/web) into supervisor/assets.h, gzip-compressed.
 
-Elyssa serves them from flash with "Content-Encoding: gzip": one upload, no file system, and the
-page works without Internet access. Run after editing anything in supervisor/web:
+Elyssa serves the files from flash with "Content-Encoding: gzip": one upload, no file system,
+and the page works without Internet access. Every file of supervisor/web is embedded, except
+tests/ and Markdown files; vendor/ files get a long browser cache. Run after any edit:
     python tools/embed_assets.py
 """
 import gzip
@@ -10,18 +11,17 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 WEB = ROOT / "supervisor" / "web"
 OUT = ROOT / "supervisor" / "assets.h"
+TYPES = {".html": "text/html; charset=utf-8", ".css": "text/css", ".js": "application/javascript",
+         ".json": "application/json", ".svg": "image/svg+xml", ".png": "image/png"}
 
-# (URL path, source file, content type, long browser cache)
-ASSETS = [
-    ("/",                    "index.html",                 "text/html; charset=utf-8",               False),
-    ("/style.css",           "style.css",                  "text/css",                               False),
-    ("/app.js",              "app.js",                     "application/javascript",                 False),
-    ("/motor3d.js",          "motor3d.js",                 "application/javascript",                 False),
-    ("/rtos.js",             "rtos.js",                    "application/javascript",                 False),
-    ("/uPlot.iife.min.js",   "vendor/uPlot.iife.min.js",   "application/javascript",                 True),
-    ("/uPlot.min.css",       "vendor/uPlot.min.css",       "text/css",                               True),
-    ("/three.module.min.js", "vendor/three.module.min.js", "application/javascript",                 True),
-]
+
+def assets():
+    for f in sorted(WEB.rglob("*")):
+        rel = f.relative_to(WEB).as_posix()
+        if f.is_dir() or rel.startswith("tests/") or f.suffix not in TYPES:
+            continue
+        url = "/" if rel == "index.html" else "/" + rel
+        yield url, f, TYPES[f.suffix], rel.startswith("vendor/")
 
 
 def main():
@@ -34,24 +34,23 @@ def main():
         "struct WebAsset { const char *path; const char *type; const uint8_t *data; size_t len; bool cache; };",
         "",
     ]
-    table = []
-    total_raw = total_gz = 0
-    for i, (path, src, ctype, cache) in enumerate(ASSETS):
-        raw = (WEB / src).read_bytes()
-        gz = gzip.compress(raw, compresslevel=9, mtime=0)       # mtime=0: reproducible output
+    table, total_raw, total_gz = [], 0, 0
+    for i, (url, f, ctype, cache) in enumerate(assets()):
+        raw = f.read_bytes()
+        gz = gzip.compress(raw, compresslevel=9, mtime=0)          # mtime=0: reproducible output
         total_raw += len(raw)
         total_gz += len(gz)
-        lines.append(f"/* {path}: {src}, {len(raw)} bytes, {len(gz)} gzipped */")
+        lines.append(f"/* {url}: {f.relative_to(WEB).as_posix()}, {len(raw)} bytes, {len(gz)} gzipped */")
         lines.append(f"static const uint8_t ASSET_{i}[{len(gz)}] = {{")
         for k in range(0, len(gz), 20):
             lines.append("  " + ",".join(f"0x{b:02x}" for b in gz[k:k + 20]) + ",")
         lines.append("};")
-        table.append(f'  {{ "{path}", "{ctype}", ASSET_{i}, sizeof ASSET_{i}, {"true" if cache else "false"} }},')
-        print(f"{path:24s} {len(raw):8d} -> {len(gz):7d} bytes")
+        table.append(f'  {{ "{url}", "{ctype}", ASSET_{i}, sizeof ASSET_{i}, {"true" if cache else "false"} }},')
+        print(f"{url:24s} {len(raw):8d} -> {len(gz):7d} bytes")
     lines += ["", "static const WebAsset WEB_ASSETS[] = {", *table, "};",
               "static const size_t WEB_ASSET_COUNT = sizeof WEB_ASSETS / sizeof WEB_ASSETS[0];", ""]
     OUT.write_text("\n".join(lines), encoding="ascii", newline="\n")
-    print(f"total {total_raw} -> {total_gz} bytes, written {OUT.relative_to(ROOT)}")
+    print(f"{len(table)} files, {total_raw} -> {total_gz} bytes, written {OUT.relative_to(ROOT)}")
 
 
 if __name__ == "__main__":

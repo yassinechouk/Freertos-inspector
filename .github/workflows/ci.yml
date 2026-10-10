@@ -1,0 +1,44 @@
+name: ci
+on: [push, pull_request]
+
+jobs:
+  protocol:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Link protocol host tests (ASan, UBSan)
+        run: gcc -Wall -Wextra -Werror -fsanitize=address,undefined protocol/test_proto.c -o test_proto && ./test_proto
+
+  dashboard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Module syntax and analysis tests
+        working-directory: supervisor/web
+        run: |
+          for f in *.js; do cp "$f" "/tmp/${f%.js}.mjs"; node --check "/tmp/${f%.js}.mjs"; done
+          node tests/analysis.test.mjs
+      - name: UI smoke test (headless Chromium)
+        run: |
+          python3 supervisor/web/tests/make_fixture.py
+          (cd supervisor/web && python3 -m http.server 8000 >/dev/null 2>&1 &)
+          mkdir -p /tmp/ui && cd /tmp/ui && npm init -y >/dev/null && npm i playwright@1.48.2 >/dev/null
+          npx playwright install --with-deps chromium >/dev/null
+          cp "$GITHUB_WORKSPACE/supervisor/web/tests/ui_smoke.mjs" . && OUT=/tmp/ui node ui_smoke.mjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ui-screenshots
+          path: /tmp/ui/*.png
+
+  firmware:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: sudo apt-get update && sudo apt-get install -y gcc-arm-none-eabi
+      - name: Build (GCC -O2, warnings as errors)
+        run: sh tools/build_firmware.sh

@@ -24,3 +24,7 @@ esp32-motor-sim/.vscode/
 
 # Private Claude Code context
 CLAUDE.md
+
+# Test outputs
+build/
+supervisor/web/tests/fixture-session.json
