@@ -67,9 +67,16 @@ static void sendHeartbeat()
   sendFrame(HIL_T_HEARTBEAT, pl, sizeof pl);
 }
 
+/* A command is "pending" until the STM32 acknowledges it (or 500 ms pass). */
+static uint32_t cmdSentMs;
+static bool     cmdPending;
+
 static void sendMode(uint8_t mode)
 {
+  Serial.printf("[CMD] sending mode %s\n", modeName(mode));
   sendFrame(HIL_T_CMD_MODE, &mode, 1);
+  cmdSentMs = millis();
+  cmdPending = true;
 }
 
 static void sendSetpoint(float rpm)
@@ -77,9 +84,12 @@ static void sendSetpoint(float rpm)
   float v = rpm * 10.0f;
   if (v > 32767.0f) v = 32767.0f;
   if (v < -32768.0f) v = -32768.0f;
+  Serial.printf("[CMD] sending setpoint %.1f rpm\n", rpm);
   uint8_t pl[2];
   hil_put_u16(pl, (uint16_t)(int16_t)v);
   sendFrame(HIL_T_CMD_SETPOINT, pl, sizeof pl);
+  cmdSentMs = millis();
+  cmdPending = true;
 }
 
 static void handleFrame(const hil_frame_t &f)
@@ -108,6 +118,7 @@ static void handleFrame(const hil_frame_t &f)
       if (f.len == 4) {
         static const char *st[] = { "ok", "clamped", "rejected" };
         const uint8_t s = f.payload[1];
+        cmdPending = false;
         Serial.printf("[ACK] type=0x%02X %s value=%d\n", f.payload[0], s < 3 ? st[s] : "?", (int)hil_get_i16(f.payload + 2));
       }
       break;
@@ -123,6 +134,13 @@ static void pollLink()
   while (Serial1.available() > 0) {
     hil_parser_push(&parser, (uint8_t)Serial1.read());
     while (hil_parser_next(&parser, &f)) {
+      /* The STM32 clock going backwards means it was reset: its sequence numbers restart
+         at 0, which must not be counted as lost frames. */
+      if (f.type == HIL_T_TELEMETRY && f.len == 12 && haveTelemetry &&
+          (hil_get_u32(f.payload) + 1000U) < tT) {
+        hil_seq_init(&rxSeq);
+        Serial.println("[LINK] STM32 restarted");
+      }
       hil_seq_update(&rxSeq, f.seq);
       lastFrameMs = millis();
       if (!alive) {
@@ -146,23 +164,29 @@ static void printStats()
                 (unsigned long)rxSeq.lost, (unsigned long)lostEvents);
 }
 
+/* Case-insensitive; "mode test" and just "test" both work; "sp 800" and "sp=800" too. */
 static void handleCommand(char *line)
 {
-  char word[12] = {0};
-  float v = 0;
-  if (sscanf(line, "mode %11s", word) == 1) {
-    if      (!strcmp(word, "idle"))   sendMode(HIL_MODE_IDLE);
-    else if (!strcmp(word, "local"))  sendMode(HIL_MODE_LOCAL);
-    else if (!strcmp(word, "remote")) sendMode(HIL_MODE_REMOTE);
-    else if (!strcmp(word, "test"))   sendMode(HIL_MODE_TEST);
-    else Serial.println("modes: idle local remote test");
-  } else if (sscanf(line, "sp %f", &v) == 1) {
-    sendSetpoint(v);
-  } else if (!strncmp(line, "stat", 4)) {
-    printStats();
-  } else if (line[0] != '\0') {
-    Serial.println("commands: mode idle|local|remote|test, sp <rpm>, stat");
+  for (char *c = line; *c != '\0'; c++) {
+    if (*c >= 'A' && *c <= 'Z') *c = (char)(*c + 32);
+    if (*c == '=') *c = ' ';
   }
+  const char *p = line;
+  while (*p == ' ') p++;
+  if (*p == '\0') return;                       /* empty line (CR then LF) */
+  Serial.printf("[CMD] received \"%s\"\n", p);
+
+  if (!strncmp(p, "mode", 4)) p += 4;
+  while (*p == ' ') p++;
+
+  float v = 0;
+  if      (!strncmp(p, "idle", 4))   sendMode(HIL_MODE_IDLE);
+  else if (!strncmp(p, "local", 5))  sendMode(HIL_MODE_LOCAL);
+  else if (!strncmp(p, "remote", 6)) sendMode(HIL_MODE_REMOTE);
+  else if (!strncmp(p, "test", 4))   sendMode(HIL_MODE_TEST);
+  else if (!strncmp(p, "sp", 2) && sscanf(p + 2, "%f", &v) == 1) sendSetpoint(v);
+  else if (!strncmp(p, "stat", 4))   printStats();
+  else Serial.println("commands: mode idle|local|remote|test, sp <rpm>, stat");
 }
 
 static void pollConsole()
@@ -203,6 +227,11 @@ void loop()
 
   pollLink();
   pollConsole();
+
+  if (cmdPending && (now - cmdSentMs) > 500) {
+    cmdPending = false;
+    Serial.println("[CMD] no ACK from the STM32 within 500 ms (command lost, or not received)");
+  }
 
   if (now - lastHbMs >= 100) {
     lastHbMs = now;
