@@ -57,6 +57,8 @@ Details: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 | Notify-to-wake latency (`-O2`) | – | 6.3 to 7.0 µs |
 | First RTOS-layer run: tasks with a shorter period but a lower priority than a 5 ms task | deadlines missed (analysis) | 7 561 and 223 misses |
 | Link over 2 Mbaud UART | – | 0 CRC errors, 0 lost frames |
+| Priorities fixed from the analysis (ctxTx 12 → 21, link 10 → 17) | R = 7.7 ms for T = 5 ms (miss) | 0 misses in 40 s, utilisation 58 %, every R measured below R computed |
+| Fault lab, 5 injected faults | one detector each | 5 of 5 detected, 0.1 to 1.0 s after injection |
 
 ## Status
 
@@ -66,7 +68,10 @@ Details: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 | Framed link with CRC and sequence numbers, dead-man on the operator | working, measured |
 | Wi-Fi gateway, setup portal, dashboard served from flash | working |
 | RTOS layer, first version (job markers in each task) | working, measured (table above) |
-| **Generic probe** (automatic discovery and job detection, detectors, fault lab), dashboard v2 | written, compiled, UI tested with synthetic data; **validation on the bench pending** |
+| **Generic probe** (automatic discovery and job detection, detectors), dashboard v2 | working, validated on the bench (2026-10-10): 13 tasks discovered, analysis and measurements agree, 0 trace events lost |
+| **Fault lab** (CPU hog, stack, queue flood, priority inversion, heap) | working: 5 faults out of 5 detected within 0.1 to 1 s |
+| Motor control from the dashboard (IDLE / TEST / REMOTE, every command acknowledged) | working, measured (1 500 rpm in TEST, 1 000 rpm in REMOTE) |
+| Public demo with a real recorded session | to do (the UI tests use a synthetic session, labelled as such) |
 
 ## Quick start
 
@@ -133,7 +138,7 @@ The original phase plan: [docs/ROADMAP-HISTORY.md](docs/ROADMAP-HISTORY.md).
 
 ## Next
 
-- Validate the generic probe and the fault lab on the bench; record a reference session and publish the demo page.
+- Record a reference session on the bench and publish the demo page (`?session=`), with real screenshots.
 - Measure the probe's own cost and the end-to-end latency from a fault to the dashboard.
 - Latency histogram for the unexplained 1.6k-cycle interrupt-to-task maximum.
 - Hardware emergency stop (TIM1 break input), watchdog, long-run test.
