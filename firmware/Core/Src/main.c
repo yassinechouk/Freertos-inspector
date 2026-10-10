@@ -135,6 +135,8 @@ typedef struct
   uint32_t mode;                /* HIL_MODE_*; IDLE after reset                */
   int32_t  remoteRpm10;         /* requested speed in REMOTE, already clamped  */
   uint32_t lastRxMs;            /* g_acq.blocks at the last valid frame        */
+  uint32_t lastSpMs;            /* g_acq.blocks at the last setpoint command   */
+  uint32_t spTimedOut;          /* 1 once the REMOTE setpoint has expired      */
   uint32_t linkAlive;           /* 1 while frames from the supervisor arrive   */
   uint32_t modeSinceMs;         /* when the current mode was entered           */
   uint32_t evtPending;          /* bit n set: event code n is to be reported   */
@@ -449,7 +451,8 @@ static void enc_update(uint32_t cyc, uint32_t cnt)
 /* Setpoint of the current mode, then limited in slew rate (except in TEST, which
    must be a clean step). TEST: 0 for CTL_HOLD_MS after entering the mode, then a
    square wave between CTL_STEP_RPM and 0. REMOTE: the speed requested by the
-   supervisor, forced to 0 when it has been silent for LINK_DEADMAN_MS. */
+   supervisor, forced to 0 when the setpoint has not been refreshed for
+   LINK_DEADMAN_MS (dead-man on the operator, not only on the link). */
 static float ctl_setpoint(uint32_t ms)
 {
   float target = 0.0f;                           /* IDLE */
@@ -460,7 +463,7 @@ static float ctl_setpoint(uint32_t ms)
       target = (float)g_acq.lastRaw * (CTL_RPM_MAX / 4095.0f);
       break;
     case HIL_MODE_REMOTE:
-      if ((ms - g_cmd.lastRxMs) <= LINK_DEADMAN_MS)
+      if ((ms - g_cmd.lastSpMs) <= LINK_DEADMAN_MS)
       {
         target = (float)g_cmd.remoteRpm10 * 0.1f;
       }
@@ -689,7 +692,11 @@ static void link_event(uint32_t code, int32_t arg)
 static void link_set_mode(uint32_t mode)
 {
   if (mode == g_cmd.mode) { return; }
-  if (mode == HIL_MODE_REMOTE) { g_cmd.remoteRpm10 = 0; }         /* nothing requested yet: stay at 0 */
+  if (mode == HIL_MODE_REMOTE)                                     /* nothing requested yet: stay at 0 */
+  {
+    g_cmd.remoteRpm10 = 0;
+    g_cmd.spTimedOut  = 1U;                                        /* no setpoint to time out yet */
+  }
   if (mode == HIL_MODE_TEST)   { g_rec.n = 0U; g_rec.done = 0U; } /* re-arm the step recording */
   g_cmd.modeSinceMs = g_acq.blocks;
   g_cmd.mode = mode;
@@ -712,6 +719,8 @@ static void link_handle_frame(const hil_frame_t *f)
         if (v < 0)    { v = 0;    status = HIL_ACK_CLAMPED; }
         if (v > vmax) { v = vmax; status = HIL_ACK_CLAMPED; }
         g_cmd.remoteRpm10 = v;
+        g_cmd.lastSpMs    = g_acq.blocks;
+        g_cmd.spTimedOut  = 0U;
         ack_push(HIL_T_CMD_SETPOINT, status, (int16_t)v);
         break;
       }
@@ -767,9 +776,17 @@ static void link_rx_poll(void)
   g_link.rxLost      = rxSeq.lost;
 }
 
-/* Supervisor silent for LINK_DEADMAN_MS: report it (REMOTE falls back to 0 by itself). */
+/* Supervisor silent, or REMOTE setpoint not refreshed, for LINK_DEADMAN_MS: report it.
+   The setpoint itself already falls back to 0 in ctl_setpoint(). */
 static void link_supervise(void)
 {
+  if ((g_cmd.mode == HIL_MODE_REMOTE) && (g_cmd.spTimedOut == 0U) &&
+      ((g_acq.blocks - g_cmd.lastSpMs) > LINK_DEADMAN_MS))
+  {
+    g_cmd.spTimedOut = 1U;
+    link_event(HIL_EVT_SP_TIMEOUT, 0);
+  }
+
   const uint32_t silent = g_acq.blocks - g_cmd.lastRxMs;
   if ((g_cmd.linkAlive != 0U) && (silent > LINK_DEADMAN_MS))
   {

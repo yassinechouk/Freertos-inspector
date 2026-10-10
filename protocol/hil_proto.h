@@ -44,10 +44,13 @@ extern "C" {
 
 /* ---- Event codes (HIL_T_EVENT) ------------------------------------------ */
 #define HIL_EVT_STALL          1u   /* arg = 0: motor driven hard without motion, output forced off */
-#define HIL_EVT_LINK_LOST      2u   /* arg = 0: no frame from the supervisor (REMOTE mode: setpoint -> 0) */
+#define HIL_EVT_LINK_LOST      2u   /* arg = 0: no frame at all from the supervisor for 1 s */
 #define HIL_EVT_LINK_RESTORED  3u
 #define HIL_EVT_MODE_CHANGED   4u   /* arg = new mode */
 #define HIL_EVT_CMD_REJECTED   5u   /* arg = frame type */
+#define HIL_EVT_SP_TIMEOUT     6u   /* arg = 0: REMOTE setpoint not refreshed for 1 s, setpoint -> 0.
+                                       The operator must resend the setpoint at least every second:
+                                       a supervisor that is merely alive does not keep the motor running. */
 
 /* ---- ACK status ---------------------------------------------------------- */
 #define HIL_ACK_OK        0u
