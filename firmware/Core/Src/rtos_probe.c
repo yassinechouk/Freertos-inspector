@@ -25,6 +25,7 @@ typedef struct
   uint64_t     runAtRelease;
   /* job statistics since reset */
   uint32_t     cMax, rMax, rMin, jobs, jobsWin, misses, missesReported;
+  uint32_t     cMaxWin, rMaxWin, cMaxLast, rMaxLast;   /* worst of the current / last second */
   uint64_t     cSum;
   /* release interval (period) */
   uint32_t     tAvg, tMin, tMax, intervals;
@@ -243,6 +244,8 @@ void rtp_on_switch_out(uint32_t tag, uint32_t blocked)
         if (c > t->cMax) { t->cMax = c; }
         if (r > t->rMax) { t->rMax = r; }
         if (r < t->rMin) { t->rMin = r; }
+        if (c > t->cMaxWin) { t->cMaxWin = c; }
+        if (r > t->rMaxWin) { t->rMaxWin = r; }
         t->cSum += c;
         t->jobs++;
         t->jobsWin++;
@@ -364,8 +367,11 @@ void rtp_second(void)
     if (t->name == NULL) { continue; }
     t->cpuPm = (uint16_t)(((run[i] - t->runPrev) * 1000U) / elapsed);
     t->runPrev = run[i];
-    t->jobsLast = (uint16_t)t->jobsWin;
-    t->jobsWin = 0U;
+    const uint32_t pmW = lock();                            /* written by the switch-out hook */
+    t->jobsLast = (uint16_t)t->jobsWin;  t->jobsWin = 0U;
+    t->cMaxLast = t->cMaxWin;            t->cMaxWin = 0U;
+    t->rMaxLast = t->rMaxWin;            t->rMaxWin = 0U;
+    unlock(pmW);
     if ((t->flags & HIL_TF_IDLE) != 0U) { idlePm = t->cpuPm; }
 
     if (t->misses != t->missesReported)                     /* deadline misses, once per second */
@@ -382,8 +388,15 @@ void rtp_second(void)
       rtp_event(HIL_EVT_STACK_LOW, (int32_t)(i | ((uint32_t)t->stackFree << 8)));
     }
 
-    if ((t->starvedSent == 0U) && (t->everRan != 0U) && (t->cpuPm == 0U) &&
-        ((t->flags & HIL_TF_IDLE) == 0U) && (eTaskGetState(t->handle) == eReady))
+    /* Starved: released (job open) more than one second ago and not given the CPU once since.
+       (Not "0 per mille and ready now": a task running a few microseconds once per second,
+       sampled just as it is released, would look starved.) */
+    const uint32_t pmS = lock();
+    const uint32_t waited = DWT->CYCCNT - t->release;
+    const int neverRan = (t->open != 0U) && (t->run == t->runAtRelease) && ((uint32_t)i != curTag);
+    unlock(pmS);
+    if ((t->starvedSent == 0U) && (t->everRan != 0U) && neverRan &&
+        ((t->flags & HIL_TF_IDLE) == 0U) && (waited > SystemCoreClock))
     {
       t->starvedSent = 1U;                                  /* re-armed when the task runs again */
       rtp_event(HIL_EVT_STARVED, (int32_t)i);
@@ -401,7 +414,8 @@ void rtp_second(void)
     }
   }
 
-  const size_t heapMin = xPortGetMinimumEverFreeHeapSize();
+  size_t heapFree, heapMin;
+  rtp_heap(&heapFree, &heapMin);
   if ((heapLowSent == 0U) && (heapMin * 100U < (size_t)configTOTAL_HEAP_SIZE * RTP_HEAP_LOW_PCT))
   {
     heapLowSent = 1U;
@@ -412,6 +426,16 @@ void rtp_second(void)
   eventsLast = ev - eventsPrev;      eventsPrev = ev;
   probePm  = (uint16_t)(((hc - hookPrev) * 1000U) / elapsed);    hookPrev = hc;
   kernelPm = (uint16_t)(((kc - kernelPrev) * 1000U) / elapsed);  kernelPrev = kc;
+}
+
+/* heap_4 sets up its free list on the first pvPortMalloc(): before that, both counters read 0
+   although the whole heap is free (seen on the bench with static allocation only). */
+void rtp_heap(size_t *freeNow, size_t *minEver)
+{
+  size_t f = xPortGetFreeHeapSize(), m = xPortGetMinimumEverFreeHeapSize();
+  if ((f == 0U) && (m == 0U)) { f = (size_t)configTOTAL_HEAP_SIZE; m = f; }
+  *freeNow = f;
+  *minEver = m;
 }
 
 int rtp_task_info(uint8_t tag, RtpTaskInfo_t *info)
@@ -443,6 +467,8 @@ void rtp_task_stats(uint8_t tag, RtpTaskStats_t *s)
   s->tMax = t->tMax;
   s->misses = (uint16_t)((t->misses > 0xFFFFU) ? 0xFFFFU : t->misses);
   s->stackFree = t->stackFree;
+  s->cMaxLast = t->cMaxLast;
+  s->rMaxLast = t->rMaxLast;
 }
 
 void rtp_sys_stats(RtpSysStats_t *s)

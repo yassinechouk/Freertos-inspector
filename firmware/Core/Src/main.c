@@ -127,7 +127,8 @@ typedef struct
   uint32_t rxFrames;            /* valid frames received                       */
   uint32_t rxCrcErrors;         /* frames rejected by the CRC                  */
   uint32_t rxLost;              /* frames missing, from the sequence numbers   */
-  uint32_t rxRestarts;          /* RX DMA found stopped (UART error): restarted */
+  uint32_t rxRestarts;          /* RX path restarted (UART error or silence)   */
+  uint32_t rxRestartFails;      /* restart refused by the HAL                  */
   uint32_t cmdRejected;         /* commands refused                            */
 } LinkStats_t;
 
@@ -764,13 +765,33 @@ static void link_handle_frame(const hil_frame_t *f)
   }
 }
 
+/* Full restart of the RX path. A UART error in DMA mode makes the HAL abort the reception;
+   seen on the bench: the DMA channel left BUSY while the UART was READY, so a plain
+   HAL_UART_Receive_DMA() kept failing and the target stopped hearing the supervisor.
+   Typical trigger: the ESP32-S3 boot ROM log (115200 baud on its U0TXD = our RX) at each
+   supervisor reset. Both sides are reset here, and the error flags cleared. */
+static void link_rx_restart(void)
+{
+  (void)HAL_UART_AbortReceive(&huart1);
+  (void)HAL_DMA_Abort(&hdma_usart1_rx);                            /* no-op error if already stopped */
+  __HAL_UART_CLEAR_FLAG(&huart1, UART_CLEAR_PEF | UART_CLEAR_FEF | UART_CLEAR_NEF | UART_CLEAR_OREF);
+  rxRd = 0U;
+  if (HAL_UART_Receive_DMA(&huart1, rxBuf, LINK_RX_LEN) == HAL_OK) { g_link.rxRestarts++; }
+  else { g_link.rxRestartFails++; }
+}
+
 /* Drains the circular RX DMA buffer into the parser. */
 static void link_rx_poll(void)
 {
-  if (huart1.RxState == HAL_UART_STATE_READY)                      /* DMA stopped by a UART error: restart */
+  static uint32_t lastRestartMs;
+  const uint32_t ms = g_acq.blocks;
+  /* Reception stopped by a UART error, or silent for 2 s although the supervisor sends a
+     heartbeat every 100 ms: restart, at most once per second. */
+  if ((huart1.RxState == HAL_UART_STATE_READY) ||
+      (((ms - g_cmd.lastRxMs) > (2U * LINK_DEADMAN_MS)) && ((ms - lastRestartMs) > LINK_DEADMAN_MS)))
   {
-    rxRd = 0U;
-    if (HAL_UART_Receive_DMA(&huart1, rxBuf, LINK_RX_LEN) == HAL_OK) { g_link.rxRestarts++; }
+    lastRestartMs = ms;
+    link_rx_restart();
     return;
   }
 
@@ -874,7 +895,7 @@ static uint32_t link_add_task_stats(uint32_t n, uint8_t tag)
   if (rtp_task_info(tag, &ti) == 0) { return n; }
   RtpTaskStats_t st;
   rtp_task_stats(tag, &st);
-  uint8_t pl[40];
+  uint8_t pl[48];
   pl[0] = tag;
   pl[1] = st.state;
   pl[2] = st.prio;
@@ -890,6 +911,8 @@ static uint32_t link_add_task_stats(uint32_t n, uint8_t tag)
   hil_put_u32(&pl[32], st.tMax);
   hil_put_u16(&pl[36], st.misses);
   hil_put_u16(&pl[38], st.stackFree);
+  hil_put_u32(&pl[40], st.cMaxLast);
+  hil_put_u32(&pl[44], st.rMaxLast);
   return link_add(n, HIL_T_TASK_STATS, pl, (uint8_t)sizeof pl);
 }
 
@@ -924,9 +947,11 @@ static uint32_t link_add_rtos_sys(uint32_t n)
   hil_put_u32(&pl[24], g_isrToTask.max);
   hil_put_u16(&pl[28], s.probePermille);
   hil_put_u16(&pl[30], s.kernelPermille);
+  size_t heapFree, heapMin;
+  rtp_heap(&heapFree, &heapMin);
   hil_put_u32(&pl[32], (uint32_t)configTOTAL_HEAP_SIZE);
-  hil_put_u32(&pl[36], (uint32_t)xPortGetFreeHeapSize());
-  hil_put_u32(&pl[40], (uint32_t)xPortGetMinimumEverFreeHeapSize());
+  hil_put_u32(&pl[36], (uint32_t)heapFree);
+  hil_put_u32(&pl[40], (uint32_t)heapMin);
   return link_add(n, HIL_T_RTOS_SYS, pl, (uint8_t)sizeof pl);
 }
 

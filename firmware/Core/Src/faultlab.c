@@ -56,8 +56,11 @@ static void heap_pressure(void)
   void *blocks[16];
   uint32_t n = 0U;
   const size_t keep = (size_t)configTOTAL_HEAP_SIZE / 4U;      /* stop at about 25 % free */
-  while ((n < 16U) && (xPortGetFreeHeapSize() > keep + FL_HEAP_BLOCK + 16U))
+  size_t freeNow, minEver;
+  for (;;)
   {
+    rtp_heap(&freeNow, &minEver);                               /* not xPortGetFreeHeapSize(): 0 before the first malloc */
+    if ((n >= 16U) || (freeNow <= keep + FL_HEAP_BLOCK + 16U)) { break; }
     blocks[n] = pvPortMalloc(FL_HEAP_BLOCK);
     if (blocks[n] == NULL) { break; }
     n++;

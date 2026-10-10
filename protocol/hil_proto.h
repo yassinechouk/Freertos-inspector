@@ -40,7 +40,11 @@ extern "C" {
                                        u8 reserved, u16 cpu_permille (last second), u16 jobs (last second),
                                        u32 c_max, u32 c_avg, u32 r_max, u32 r_min,
                                        u32 t_avg, u32 t_min, u32 t_max (release-to-release interval),
-                                       u16 deadline_misses, u16 stack_free_words (all "since reset") */
+                                       u16 deadline_misses, u16 stack_free_words (all "since reset"),
+                                       u32 c_max_last, u32 r_max_last (worst of the last second; 0 = no job).
+                                       Note: a task that is late enough for vTaskDelayUntil() to return without
+                                       blocking runs several periods in one job, so c_max can exceed one period's
+                                       work after an overload: the analysis uses the recent maxima. */
 #define HIL_T_TRACE       0x12u     /* continuous trace, a burst of events:
                                        u32 t0 (cycles), u16 dropped (events lost so far, wraps),
                                        then N x { u8 id, u24 delta } with delta in cycles from the previous

@@ -55,6 +55,7 @@ typedef struct
   uint32_t tAvg, tMin, tMax;
   uint16_t misses;
   uint16_t stackFree;
+  uint32_t cMaxLast, rMaxLast; /* worst C and R of the last second */
 } RtpTaskStats_t;
 
 typedef struct
@@ -87,5 +88,6 @@ int      rtp_task_info(uint8_t tag, RtpTaskInfo_t *info);
 void     rtp_task_stats(uint8_t tag, RtpTaskStats_t *s);
 void     rtp_sys_stats(RtpSysStats_t *s);
 int      rtp_queue_stats(uint8_t qid, RtpQueueStats_t *s);
+void     rtp_heap(size_t *freeNow, size_t *minEver);   /* free heap now / minimum ever, in bytes */
 
 #endif /* RTOS_PROBE_H */
