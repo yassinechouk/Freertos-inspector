@@ -17,6 +17,7 @@ ASSETS = [
     ("/style.css",           "style.css",                  "text/css",                               False),
     ("/app.js",              "app.js",                     "application/javascript",                 False),
     ("/motor3d.js",          "motor3d.js",                 "application/javascript",                 False),
+    ("/rtos.js",             "rtos.js",                    "application/javascript",                 False),
     ("/uPlot.iife.min.js",   "vendor/uPlot.iife.min.js",   "application/javascript",                 True),
     ("/uPlot.min.css",       "vendor/uPlot.min.css",       "text/css",                               True),
     ("/three.module.min.js", "vendor/three.module.min.js", "application/javascript",                 True),

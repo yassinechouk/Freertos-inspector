@@ -1,4 +1,6 @@
 // HIL bench dashboard: WebSocket client, live curves (uPlot), health indicators, controls.
+import * as rtos from '/rtos.js';
+
 const $ = id => document.getElementById(id);
 const css = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 
@@ -79,16 +81,21 @@ function onSys(m) {
 
 function connect() {
   ws = new WebSocket(`ws://${location.host}/ws`);
+  ws.binaryType = 'arraybuffer';
   ws.onopen = () => pill($('pws'), 'browser: ok', 'ok');
   ws.onclose = () => { pill($('pws'), 'browser: lost', 'bad'); setTimeout(connect, 1000); };
   ws.onmessage = e => {
     msgs++;
+    if (typeof e.data !== 'string') { if (new Uint8Array(e.data)[0] === 0x54) rtos.onTrace(e.data); return; }
     const m = JSON.parse(e.data);
     if (m.type === 'tel' && m.s.length) onTelemetry(m);
     else if (m.type === 'sys') onSys(m);
     else if (m.type === 'evt') log(`EVENT ${m.name}${m.arg ? ' (' + m.arg + ')' : ''}  t=${m.t} ms`);
     else if (m.type === 'ack') log(`ACK ${m.cmd} ${m.status} ${m.value}`);
     else if (m.type === 'info') log(m.text);
+    else if (m.type === 'task') rtos.onTask(m);
+    else if (m.type === 'tstat') rtos.onStats(m);
+    else if (m.type === 'rsys') rtos.onSys(m);
   };
 }
 
@@ -105,4 +112,5 @@ document.querySelectorAll('.tab').forEach(t => t.onclick = () => {
   dispatchEvent(new Event('resize'));
 });
 
+rtos.init();
 connect();

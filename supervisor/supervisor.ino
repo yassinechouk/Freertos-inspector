@@ -91,6 +91,82 @@ void on_stm32_restart()
   web_broadcast("{\"type\":\"info\",\"text\":\"STM32 restarted\"}");
 }
 
+/* ---- RTOS layer: configuration and statistics as JSON, trace as binary ------------------ */
+
+void on_task_table(const uint8_t *p, uint8_t len)
+{
+  if (len < 16) return;
+  char name[24];
+  uint8_t n = 0;
+  for (uint8_t i = 16; i < len && n < sizeof name - 1; i++) {
+    const char c = (char)p[i];
+    name[n++] = (c >= 32 && c < 127 && c != '"' && c != '\\') ? c : '_';   /* safe inside a JSON string */
+  }
+  name[n] = 0;
+  char j[200];
+  snprintf(j, sizeof j,
+           "{\"type\":\"task\",\"tag\":%u,\"prio\":%u,\"period\":%u,\"deadline\":%u,\"wcet\":%lu,\"stack\":%u,\"fcpu\":%lu,\"name\":\"%s\"}",
+           p[0], p[1], hil_get_u16(p + 2), hil_get_u16(p + 4), (unsigned long)hil_get_u32(p + 6),
+           hil_get_u16(p + 10), (unsigned long)hil_get_u32(p + 12), name);
+  web_broadcast(j);
+}
+
+void on_task_stats(const uint8_t *p, uint8_t len)
+{
+  if (len < 25) return;
+  char j[200];
+  snprintf(j, sizeof j,
+           "{\"type\":\"tstat\",\"tag\":%u,\"cpu\":%u,\"jobs\":%u,\"cmax\":%lu,\"cavg\":%lu,\"rmax\":%lu,\"rmin\":%lu,\"miss\":%u,\"stack\":%u}",
+           p[0], hil_get_u16(p + 1), hil_get_u16(p + 3), (unsigned long)hil_get_u32(p + 5),
+           (unsigned long)hil_get_u32(p + 9), (unsigned long)hil_get_u32(p + 13),
+           (unsigned long)hil_get_u32(p + 17), hil_get_u16(p + 21), hil_get_u16(p + 23));
+  web_broadcast(j);
+}
+
+void on_rtos_sys(const uint8_t *p, uint8_t len)
+{
+  if (len < 28) return;
+  char j[220];
+  snprintf(j, sizeof j,
+           "{\"type\":\"rsys\",\"fcpu\":%lu,\"sw\":%lu,\"ev\":%lu,\"drop\":%lu,\"idle\":%u,\"tick\":%u,\"ctx\":%lu,\"isr\":%lu}",
+           (unsigned long)hil_get_u32(p), (unsigned long)hil_get_u32(p + 4), (unsigned long)hil_get_u32(p + 8),
+           (unsigned long)hil_get_u32(p + 12), hil_get_u16(p + 16), hil_get_u16(p + 18),
+           (unsigned long)hil_get_u32(p + 20), (unsigned long)hil_get_u32(p + 24));
+  web_broadcast(j);
+}
+
+/* Trace events, decoded to absolute timestamps and batched for the browsers:
+   one binary WebSocket message every 100 ms = 'T', u16 dropped (STM32), u16 dropped (here),
+   then N x { u32 cycles, u8 id }, little-endian. */
+static uint8_t  traceBuf[5 + 5 * 2400];
+static size_t   traceLen;
+static uint16_t traceDroppedStm, traceDroppedHere;
+
+void on_trace(const uint8_t *p, uint8_t len)
+{
+  if (len < 6) return;
+  uint32_t cyc = hil_get_u32(p);
+  traceDroppedStm = hil_get_u16(p + 4);
+  for (uint8_t i = 6; i + 4 <= len; i += 4) {
+    cyc += (uint32_t)p[i + 1] | ((uint32_t)p[i + 2] << 8) | ((uint32_t)p[i + 3] << 16);
+    if (traceLen == 0) traceLen = 5;                 /* room for the header */
+    if (traceLen + 5 > sizeof traceBuf) { traceDroppedHere++; continue; }
+    hil_put_u32(&traceBuf[traceLen], cyc);
+    traceBuf[traceLen + 4] = p[i];
+    traceLen += 5;
+  }
+}
+
+static void flushTrace()
+{
+  if (traceLen <= 5) return;
+  traceBuf[0] = 'T';
+  hil_put_u16(&traceBuf[1], traceDroppedStm);
+  hil_put_u16(&traceBuf[3], traceDroppedHere);
+  web_broadcast_bin(traceBuf, traceLen);
+  traceLen = 0;
+}
+
 /* ---- Commands (console and browser go through the same path) ---------------------- */
 
 static void commandMode(uint8_t mode)
@@ -272,7 +348,7 @@ void loop()
 
   if (now - lastHbMs >= HEARTBEAT_MS)  { lastHbMs = now;    link_send_heartbeat(); }
   if (now - lastSpMs >= SP_REFRESH_MS) { lastSpMs = now;    refreshSetpoint(); }
-  if (now - lastBatchMs >= TEL_BATCH_MS) { lastBatchMs = now; sendBatch(); }
+  if (now - lastBatchMs >= TEL_BATCH_MS) { lastBatchMs = now; sendBatch(); flushTrace(); }
   if (now - lastSysMs >= SYS_MS)       { lastSysMs = now;   sendSys(); updateLed(); }
 
   if (now - lastPrintMs >= PRINT_MS) {

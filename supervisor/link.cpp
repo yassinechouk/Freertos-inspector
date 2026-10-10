@@ -1,6 +1,6 @@
 #include "link.h"
 
-static const uint32_t LINK_BAUD = 921600;
+static const uint32_t LINK_BAUD = 2000000;   /* continuous RTOS trace: ~40 kB/s */
 static const int      LINK_RX   = 44;
 static const int      LINK_TX   = 43;
 static const uint32_t LOST_MS   = 300;      /* no valid frame for this long: STM32 lost */
@@ -19,7 +19,7 @@ static uint32_t     cmdSentMs;
 
 void link_begin()
 {
-  Serial1.setRxBufferSize(2048);
+  Serial1.setRxBufferSize(16384);             /* ~0.4 s of traffic: loop() may pause for Wi-Fi */
   Serial1.begin(LINK_BAUD, SERIAL_8N1, LINK_RX, LINK_TX);
   hil_parser_init(&parser);
   hil_seq_init(&rxSeq);
@@ -88,6 +88,10 @@ static void handleFrame(const hil_frame_t &f)
         on_ack(f.payload[0], f.payload[1], hil_get_i16(f.payload + 2));
       }
       break;
+    case HIL_T_TASK_TABLE: on_task_table(f.payload, f.len); break;
+    case HIL_T_TASK_STATS: on_task_stats(f.payload, f.len); break;
+    case HIL_T_RTOS_SYS:   on_rtos_sys(f.payload, f.len);   break;
+    case HIL_T_TRACE:      on_trace(f.payload, f.len);      break;
     default:
       break;                                   /* heartbeat: presence only */
   }

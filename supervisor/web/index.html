@@ -72,10 +72,44 @@
 
 <main id="rtos" class="view">
   <section class="card wide">
-    <h2>RTOS layer</h2>
-    <p>Arrives in step 3b: configured tasks (priority, period, deadline, stack), measured execution times and
-      CPU load, context-switch timeline (Gantt), and a schedulability analysis computed here from the
-      measurements, with what-if editing.</p>
+    <h2>Scheduling verdict</h2>
+    <div class="kpis">
+      <div><small>verdict</small><span id="rverdict" class="verdict">-</span></div>
+      <div><small>CPU load</small><span id="rcpu">-</span></div>
+      <div><small>utilisation (analysis)</small><span id="rutil">-</span></div>
+      <div><small>context switches / s</small><span id="rsw">-</span></div>
+      <div><small>trace events / s</small><span id="rev">-</span></div>
+      <div><small>context switch, worst</small><span id="rctx">-</span></div>
+      <div><small>interrupt to task, worst</small><span id="risr">-</span></div>
+    </div>
+  </section>
+
+  <section class="card wide">
+    <h2>Tasks <button id="rreset" class="small">reset what-if</button></h2>
+    <div class="tablewrap"><table class="tasks">
+      <thead><tr>
+        <th>task</th><th>prio</th><th>T (ms)</th><th>D (ms)</th><th>C declared</th><th>C measured</th>
+        <th>C for analysis (&micro;s)</th><th>R measured</th><th>R computed</th><th>margin</th><th>misses</th><th>CPU</th><th>stack free</th>
+      </tr></thead>
+      <tbody id="rtasks"></tbody>
+    </table></div>
+    <p class="note">Measured values are worst cases since the STM32 reset. Edit priority, period or C to ask
+      "what if": the analysis below is recomputed here, the STM32 is not changed. R computed = C + interference of
+      higher-priority tasks (each with one context switch) + the ADC DMA interrupt, iterated until it stops moving.</p>
+  </section>
+
+  <section class="card wide">
+    <h2>Timeline
+      <select id="gwin"><option value="5">5 ms</option><option value="20" selected>20 ms</option><option value="50">50 ms</option><option value="100">100 ms</option></select>
+      <button id="gpause" class="small">Pause</button></h2>
+    <canvas id="gantt"></canvas>
+    <p class="note">Continuous trace of every context switch and ADC DMA interrupt (red), ticks on the time axis.
+      Highest priority at the top.</p>
+  </section>
+
+  <section class="card wide">
+    <h2>Doctor</h2>
+    <ul id="rfind" class="find"></ul>
   </section>
 </main>
 

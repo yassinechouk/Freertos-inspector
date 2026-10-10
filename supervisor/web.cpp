@@ -163,7 +163,7 @@ static esp_err_t ws_handler(httpd_req_t *req)
 
 /* ---- Broadcast (runs in the server task through httpd_queue_work) ----------------- */
 
-struct WsMsg { size_t len; char data[1]; };
+struct WsMsg { size_t len; bool binary; char data[1]; };
 
 static void broadcast_work(void *arg)
 {
@@ -175,7 +175,7 @@ static void broadcast_work(void *arg)
     for (size_t i = 0; i < n; i++) {
       if (httpd_ws_get_fd_info(server, fds[i]) != HTTPD_WS_CLIENT_WEBSOCKET) continue;
       httpd_ws_frame_t f{};
-      f.type = HTTPD_WS_TYPE_TEXT;
+      f.type = m->binary ? HTTPD_WS_TYPE_BINARY : HTTPD_WS_TYPE_TEXT;
       f.payload = (uint8_t *)m->data;
       f.len = m->len;
       httpd_ws_send_frame_async(server, fds[i], &f);
@@ -193,7 +193,19 @@ void web_broadcast(const char *json)
   WsMsg *m = (WsMsg *)malloc(sizeof(WsMsg) + len);
   if (m == nullptr) return;
   m->len = len;
+  m->binary = false;
   memcpy(m->data, json, len + 1);
+  if (httpd_queue_work(server, broadcast_work, m) != ESP_OK) free(m);
+}
+
+void web_broadcast_bin(const uint8_t *data, size_t len)
+{
+  if (server == nullptr || portal || wsClients == 0) return;   /* big messages: only if someone listens */
+  WsMsg *m = (WsMsg *)malloc(sizeof(WsMsg) + len);
+  if (m == nullptr) return;
+  m->len = len;
+  m->binary = true;
+  memcpy(m->data, data, len);
   if (httpd_queue_work(server, broadcast_work, m) != ESP_OK) free(m);
 }
 

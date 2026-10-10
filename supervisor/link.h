@@ -1,4 +1,4 @@
-/* STM32 link: hil_proto.h frames over Serial1 (921600 8N1, RX GPIO44, TX GPIO43). */
+/* STM32 link: hil_proto.h frames over Serial1 (2 Mbaud 8N1, RX GPIO44, TX GPIO43). */
 #pragma once
 #include <Arduino.h>
 #include "hil_proto.h"
@@ -35,3 +35,8 @@ void on_ack(uint8_t type, uint8_t status, int16_t value);
 void on_ack_timeout();
 void on_link_state(bool alive);
 void on_stm32_restart();
+/* RTOS layer frames (payload as defined in hil_proto.h) */
+void on_task_table(const uint8_t *p, uint8_t len);
+void on_task_stats(const uint8_t *p, uint8_t len);
+void on_rtos_sys(const uint8_t *p, uint8_t len);
+void on_trace(const uint8_t *p, uint8_t len);

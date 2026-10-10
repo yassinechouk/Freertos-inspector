@@ -16,4 +16,5 @@ struct WebCmd
 void web_begin(bool portal);
 bool web_next_command(WebCmd *c);          /* from loop(): next command received from a browser */
 void web_broadcast(const char *json);      /* to every WebSocket client; safe from loop() */
+void web_broadcast_bin(const uint8_t *data, size_t len);   /* binary WebSocket message */
 int  web_clients();
