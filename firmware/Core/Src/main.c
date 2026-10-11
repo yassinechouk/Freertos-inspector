@@ -1231,6 +1231,15 @@ int main(void)
   /* Fault lab: demo tasks that inject faults on request (HIL_T_CMD_FAULT). The RTOS Doctor
      probe needs no registration: every task is discovered when FreeRTOS creates it. */
   faultlab_init();
+
+  /* Deadlines of the periodic tasks (D = T). Without them the probe would use the measured mean
+     period; declaring them lets the dashboard show and check a deadline for every periodic task. */
+  rtp_set_deadline(hAcq, 1U);
+  rtp_set_deadline(hCtxTx, CTX_TX_PERIOD_MS);
+  rtp_set_deadline(hTaskA, TASK_A_PERIOD_MS);
+  rtp_set_deadline(hLink, LINK_PERIOD_MS);
+  rtp_set_deadline(hTaskB, TASK_B_PERIOD_MS);
+  rtp_set_deadline((TaskHandle_t)healthTaskHandle, HEALTH_PERIOD_MS);
   /* USER CODE END RTOS_THREADS */
 
   /* USER CODE BEGIN RTOS_EVENTS */
