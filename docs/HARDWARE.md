@@ -37,6 +37,9 @@ to OSC_IN by default, whatever the revision (UM1724 §6.7.1).
 
 ## Current wiring (2026-10)
 
+![Bench wiring](images/bench-wiring.svg)
+
+
 | From | To | Signal |
 | --- | --- | --- |
 | STM32 PA9 (D8) | ESP32 #1 GPIO14 | Motor PWM, 20 kHz, measured by the plant model (MCPWM capture) |
