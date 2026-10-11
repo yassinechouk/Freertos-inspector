@@ -148,9 +148,12 @@ iterated until R stops changing. A task is *guaranteed* when R ≤ D.
 
 The bench gives the probe a real hard-real-time application to watch, closed through real electrical signals.
 
-![Bench wiring: STM32 drives the motor model with PWM, reads its encoder, and talks to the gateway](docs/images/bench-wiring.svg)
+![The bench, cabled and running](docs/images/bench.jpg)
 
-<!-- Photo of the cabled bench: add docs/images/bench.jpg and reference it here. -->
+<sub>The bench: NUCLEO-L476RG (top left, the target), ESP32-S3 UNO running the motor model (bottom left), Elyssa
+gateway on the breadboard (right; its green LED means the STM32 link is up) and the setpoint potentiometer.</sub>
+
+![Bench wiring: STM32 drives the motor model with PWM, reads its encoder, and talks to the gateway](docs/images/bench-wiring.svg)
 
 **The loop, every millisecond:**
 
