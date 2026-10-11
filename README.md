@@ -8,8 +8,9 @@ It is built and proven on a hardware-in-the-loop motor-control bench (STM32 + tw
 
 ![The Inspector view: verdict, what runs on the CPU, and every task with its priority, period, deadline and response time](docs/images/inspector.png)
 
-<sub>Screenshot from the replay of a <b>simulated</b> session of the bench task set (the dashboard shows the
-"simulated data" badge): see <a href="#tests">Tests</a>. Real measurements are in <a href="#results-measured-on-the-bench">Results</a>.</sub>
+<sub>Real session recorded on the bench (2026-10-11): 13 tasks discovered, 7 with a deadline, all on time, CPU 47.6 % busy.
+The "Motor stall protection" alert is real too: the motor model was not answering during this run, and the stall protection
+cut the motor as designed.</sub>
 
 ## Contents
 
@@ -58,8 +59,10 @@ Each row of the task board:
 | **Start delay** | longest wait from "ready" to "running" in the last 0.5 s: how long the task waited for higher-priority work |
 | **Trend** | worst response time of each second over the last minute, as a share of the deadline (the red line is 100 %) |
 
-When something goes wrong, the board says which task and by how much. Below, the fault lab has injected a
-CPU hog (one task runs 150 ms without blocking): the two tasks below it are late, and the banner names them.
+When something goes wrong, the board says which task and by how much. Below, on the bench, the fault lab has
+injected a CPU hog (a priority-18 task busy-waits 150 ms without blocking): link and taskB, below it, are late,
+and the banner names them. The analysis now uses the merged 184 ms job of taskB, so utilisation reads 147 % until
+that job leaves the 10 s window: the numbers say exactly what happened, they are not smoothed.
 
 ![Inspector after an injected CPU hog: link and taskB are late](docs/images/inspector-fault.png)
 
@@ -184,7 +187,10 @@ flowchart LR
 
 Priorities follow the periods (rate-monotonic): the shorter the period, the higher the priority.
 The **fault lab** (`faultlab.c`) injects, on request and for a bounded time, a CPU hog, stack pressure, a queue
-flood, a priority inversion or heap pressure, always in isolated tasks below the control loop.
+flood, a priority inversion or heap pressure, always in isolated tasks below the control loop. Each card reports
+the matching detection and its delay, measured on the target clock (here, a run on the bench):
+
+![Fault lab: CPU hog, stack pressure and queue flood detected on the bench](docs/images/faults.png)
 
 Pins and board notes: [docs/HARDWARE.md](docs/HARDWARE.md).
 
@@ -199,6 +205,9 @@ Pins and board notes: [docs/HARDWARE.md](docs/HARDWARE.md).
 | Same tasks after raising their priorities from the analysis (ctxTx 12 → 21, link 10 → 17) | R below D | 0 misses in 40 s, every measured R below the computed R |
 | Link over UART at 2 Mbaud | – | 0 CRC errors, 0 lost frames |
 | Fault lab, 5 injected faults | one detection each | 5 of 5 detected, 0.1 to 1.0 s after injection |
+| Fault lab, run of 2026-10-11 (target clock) | – | CPU hog 0.15 s · stack pressure 0.72 s · queue flood 0.42 s |
+| Cost of observing (probe hooks / kernel switching) | – | **1.7 %** / 1.3 % of the CPU, at 2 841 switches/s and 7 562 trace events/s |
+| CPU load, 13 tasks, declared deadlines | utilisation 58.1 % (analysis, worst C of each task) | 47.6 % busy on average, 0 deadline misses until the injected fault |
 
 Two logic-analyser captures from the bench: task A and task B on their timing pins (B is preempted by A: 7.01 ms
 instead of 5 ms), and the motor PWM at 68 % duty, 20 kHz.
@@ -253,8 +262,9 @@ jobs, and C is the worst value observed, not a proven worst case.
 All of them run on every push (`.github/workflows/ci.yml`). The UI test replays a **synthetic** session made by
 `supervisor/web/tests/make_fixture.py`: a small scheduler simulation of the bench task set (real priorities and
 periods, assumed execution times) with a CPU hog injected at 6 s. It opens every view in light and dark mode and at
-phone width, and fails on any JavaScript error. The screenshots of this README come from the same session
-(`supervisor/web/tests/screenshots.mjs`).
+phone width, and fails on any JavaScript error. The screenshots of this README come from a session recorded on
+the bench, replayed by `supervisor/web/tests/screenshots.mjs` (`SESSION=<file> HEALTHY=<s> FAULT=<s>`): record a new
+session with the **Record** button and run it again to refresh them.
 
 ## Repository layout
 
@@ -268,6 +278,6 @@ docs/              architecture, hardware, measurement log, lessons learned, ima
 captures/          logic-analyser captures from the bench
 ```
 
-**Next:** record a reference session on the bench and publish it as a replayable demo; measure the probe's own
-cost and the end-to-end latency from a fault to the dashboard; hardware emergency stop (TIM1 break input), watchdog
+**Next:** publish a reference session as a replayable demo; make the gateway flush its trace buffer when full
+(events are lost when its loop stalls more than 0.3 s); measure the end-to-end latency from a fault to the dashboard; hardware emergency stop (TIM1 break input), watchdog
 and a long-run test.

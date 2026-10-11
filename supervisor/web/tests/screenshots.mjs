@@ -1,19 +1,36 @@
-// README screenshots from the SYNTHETIC fixture session (tests/make_fixture.py): the dashboard
-// replays a simulated task set, and every picture shows the "simulated data" badge.
-// Usage (dashboard served on BASE, Playwright installed): OUT=docs/images node screenshots.mjs
+// README screenshots from a recorded session (Record button) replayed in the dashboard.
+// Usage, with the dashboard served on BASE and Playwright installed:
+//   SESSION=tests/<file>.json HEALTHY=75 FAULT=91 OUT=docs/images node screenshots.mjs
+// HEALTHY and FAULT are session times in seconds: before and just after a fault injected from the Fault lab.
+// Without SESSION, the synthetic fixture (tests/make_fixture.py) is used, with its CPU hog at 6 s.
+import { readFileSync } from 'node:fs';
 const { chromium } = await import('playwright').catch(() => import('playwright-core'));
 
 const base = process.env.BASE || 'http://localhost:8000';
 const out = process.env.OUT || '.';
-const browser = await chromium.launch(process.env.CHROME ? { executablePath: process.env.CHROME } : {});
-const page = await browser.newPage({ viewport: { width: 1360, height: 900 }, colorScheme: 'light', deviceScaleFactor: 1 });
-const shot = (name, opts = {}) => page.screenshot({ path: `${out}/${name}.png`, ...opts });
+const session = process.env.SESSION || 'tests/fixture-session.json';
+const healthy = +(process.env.HEALTHY || 5.6), fault = +(process.env.FAULT || 8.6);
+const root = process.env.WEB || new URL('..', import.meta.url).pathname;
+const times = JSON.parse(readFileSync(root + '/' + session, 'utf8')).messages.map(m => m[0]);
+const indexAt = s => times.findIndex(t => t >= s * 1000);           // first message at or after s seconds
 
-await page.goto(`${base}/index.html?session=tests/fixture-session.json`);
+const browser = await chromium.launch(process.env.CHROME ? { executablePath: process.env.CHROME } : {});
+const page = await browser.newPage({ viewport: { width: 1360, height: 900 }, colorScheme: 'light' });
+const shot = (name, opts = {}) => page.screenshot({ path: `${out}/${name}.png`, ...opts });
+const position = async () => +((await page.textContent('#h-src')).match(/replay (\d+)/) || [0, 0])[1];
+async function runTo(s) {                                           // play, then pause at s seconds
+  const target = indexAt(s);
+  await page.selectOption('#s-speed', '5');
+  if ((await page.textContent('#s-play')).includes('Play')) await page.click('#s-play');
+  while (await position() < target) await page.waitForTimeout(50);
+  await page.click('#s-play');
+  await page.waitForTimeout(600);
+}
+
+await page.goto(`${base}/index.html?session=${session}`);
+await page.waitForTimeout(500);
 await page.click('.tab[data-view="overview"]');
-await page.waitForTimeout(5600);                                  // healthy: before the fault at 6 s
-await page.click('#s-play');                                      // pause the replay
-await page.waitForTimeout(400);
+await runTo(healthy);
 await shot('inspector', { fullPage: true });
 await page.click('.tab[data-view="timeline"]');
 await page.selectOption('#tl-win', '50');
@@ -23,13 +40,15 @@ await page.click('.tab[data-view="analysis"]');
 await page.click('#an-body tr[data-tag="2"] td:nth-child(2)');
 await page.waitForTimeout(400);
 await shot('analysis', { fullPage: true });
-await page.click('#s-play');                                      // resume: the CPU hog is injected at 6 s
 await page.click('.tab[data-view="overview"]');
-await page.waitForTimeout(3000);
+await runTo(fault);
 await shot('inspector-fault', { fullPage: true });
 await page.click('.tab[data-view="tasks"]');
 await page.click('#tk-body tr[data-tag="3"]');
 await page.waitForTimeout(600);
 await shot('tasks', { fullPage: true });
+await page.click('.tab[data-view="faults"]');
+await page.waitForTimeout(400);
+await shot('faults');
 await browser.close();
 console.log(`screenshots written to ${out}`);
