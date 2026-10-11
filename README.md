@@ -8,9 +8,8 @@ It is built and proven on a hardware-in-the-loop motor-control bench (STM32 + tw
 
 ![The Inspector view: verdict, what runs on the CPU, and every task with its priority, period, deadline and response time](docs/images/inspector.png)
 
-<sub>Real session recorded on the bench (2026-10-11): 13 tasks discovered, 7 with a deadline, all on time, CPU 47.6 % busy.
-The "Motor stall protection" alert is real too: the motor model was not answering during this run, and the stall protection
-cut the motor as designed.</sub>
+<sub>Real session recorded on the bench (2026-10-11), motor running in TEST mode: 13 tasks discovered, 7 with a deadline,
+all on time, CPU 47.8 % busy.</sub>
 
 ## Contents
 
@@ -61,7 +60,7 @@ Each row of the task board:
 
 When something goes wrong, the board says which task and by how much. Below, on the bench, the fault lab has
 injected a CPU hog (a priority-18 task busy-waits 150 ms without blocking): link and taskB, below it, are late,
-and the banner names them. The analysis now uses the merged 184 ms job of taskB, so utilisation reads 147 % until
+and the banner names them. The analysis now uses the merged 195 ms job of taskB, so utilisation reads 153 % until
 that job leaves the 10 s window: the numbers say exactly what happened, they are not smoothed.
 
 ![Inspector after an injected CPU hog: link and taskB are late](docs/images/inspector-fault.png)
@@ -169,6 +168,8 @@ flowchart LR
   quadrature encoder signals the STM32 reads back.
 - The hardware does the input and output (PWM, encoder counting, ADC sampling, UART by DMA): the CPU only decides.
 
+![Motor view on the bench: TEST mode, setpoint square wave 0 / 1500 rpm, speed and duty cycle](docs/images/motor.png)
+
 **The tasks of the bench firmware** (as the Inspector shows them):
 
 | Task | Priority | Period | Deadline | What it does |
@@ -204,10 +205,10 @@ Pins and board notes: [docs/HARDWARE.md](docs/HARDWARE.md).
 | First run: ctxTx (5 ms) and link (10 ms) below taskB (25 ms) in priority | deadlines missed (analysis) | 7 561 and 223 misses |
 | Same tasks after raising their priorities from the analysis (ctxTx 12 → 21, link 10 → 17) | R below D | 0 misses in 40 s, every measured R below the computed R |
 | Link over UART at 2 Mbaud | – | 0 CRC errors, 0 lost frames |
-| Fault lab, 5 injected faults | one detection each | 5 of 5 detected, 0.1 to 1.0 s after injection |
-| Fault lab, run of 2026-10-11 (target clock) | – | CPU hog 0.15 s · stack pressure 0.72 s · queue flood 0.42 s |
+| Fault lab, run of 2026-10-11 (detection delay, target clock) | one detection each | 5 of 5: CPU hog 0.15 s · stack 0.32 s · queue flood 0.58 s · priority inversion 0.002 s (holder raised to 21 for 4.6 ms) · heap 0.30 s |
 | Cost of observing (probe hooks / kernel switching) | – | **1.7 %** / 1.3 % of the CPU, at 2 841 switches/s and 7 562 trace events/s |
-| CPU load, 13 tasks, declared deadlines | utilisation 58.1 % (analysis, worst C of each task) | 47.6 % busy on average, 0 deadline misses until the injected fault |
+| CPU load, 13 tasks, declared deadlines | utilisation 58.1 % (analysis, worst C of each task) | 47.8 % busy on average, 0 deadline misses until the injected fault |
+| TEST mode, steady state at 1500 rpm | duty 50 % (K = 3000 rpm at 100 %) | 1498 rpm at 50.1 % duty |
 
 Two logic-analyser captures from the bench: task A and task B on their timing pins (B is preempted by A: 7.01 ms
 instead of 5 ms), and the motor PWM at 68 % duty, 20 kHz.
