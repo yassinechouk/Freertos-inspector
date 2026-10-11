@@ -23,7 +23,8 @@ const FAULTS = [
     learn: 'The minimum-ever free heap drops below 30 % and stays there: a later allocation could fail. Reported once per target reset.' },
 ];
 
-const runs = new Map();   // key -> { at, seen: Set }
+const KEYS = { 1: 'hog', 2: 'stack', 3: 'queue', 4: 'inversion', 5: 'heap' };   // HIL_FAULT_* -> card
+const runs = new Map();   // key -> { at, t0 (target ms), seen: Set, doneAt, delay (s, target clock) }
 let send = () => {};
 
 export function init(ctx) {
@@ -47,11 +48,24 @@ export function init(ctx) {
   bus.addEventListener('alert', ev => {
     const a = ev.detail;
     if (!a) return;
+    // The target reports every injection (from this page, another browser, the console, or a replayed
+    // session): follow it, and measure the detection delay on the target clock when it is known.
+    if (a.code === 'FAULT_INJECTED') {
+      const key = KEYS[a.task];
+      if (key) {
+        const r = runs.get(key);
+        if (r && !r.t0 && Date.now() - r.at < 3000) r.t0 = a.tMs;
+        else runs.set(key, { at: Date.now(), t0: a.tMs, seen: new Set() });
+      }
+    }
     for (const [k, r] of runs) {
       if (Date.now() - r.at >= 8000 || r.doneAt) continue;
       r.seen.add(a.code);
       const f = FAULTS.find(x => x.key === k);
-      if (f.expect.every(e => r.seen.has(e))) r.doneAt = Date.now();      // time of the detection, not of the display
+      if (f.expect.every(e => r.seen.has(e))) {
+        r.doneAt = Date.now();                                       // time of the detection, not of the display
+        if (r.t0 != null && a.tMs != null) r.delay = (a.tMs - r.t0) / 1000;
+      }
     }
     render();
   });
@@ -80,7 +94,8 @@ export function render() {
       continue;
     }
     box.className = 'result ' + (all ? 'ok' : age > 8 ? 'bad' : 'wait');
-    box.innerHTML = all ? `Detected: ${got.join(' + ')} (${(((r.doneAt ?? Date.now()) - r.at) / 1000).toFixed(1)} s after injection)`
+    const delay = r.delay ?? ((r.doneAt ?? Date.now()) - r.at) / 1000;
+    box.innerHTML = all ? `✓ Detected: ${got.join(' + ')}, ${delay.toFixed(2)} s after injection${r.delay != null ? ' (target clock)' : ''}`
       : age > 8 ? `Not detected within 8 s${got.length ? ` (only ${got.join(', ')})` : ''}`
       : `Waiting for the detectors… ${got.length ? 'seen: ' + got.join(', ') : ''}`;
   }

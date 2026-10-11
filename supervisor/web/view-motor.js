@@ -6,7 +6,7 @@ const $ = id => document.getElementById(id);
 const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
 const WINDOW = 1000;                              // samples: 10 s at 100 Hz
 const T = [], SP = [], RPM = [], DUTY = [];
-let chartSpeed = null, chartDuty = null, motor = null, send = () => {};
+let chartSpeed = null, chartDuty = null, motor = null, send = () => {}, last = null;
 
 function makeChart(el, series, yLabel, range) {
   const axis = label => ({ stroke: css('--mut'), grid: { stroke: css('--line'), width: 1 }, ticks: { stroke: css('--line') }, label });
@@ -49,18 +49,28 @@ export function init(ctx) {
     for (const [t, sp, rpm, duty] of m.s) { T.push(t / 1000); SP.push(sp); RPM.push(rpm); DUTY.push(duty); }
     const extra = T.length - WINDOW;
     if (extra > 0) for (const a of [T, SP, RPM, DUTY]) a.splice(0, extra);
-    const [, sp, rpm, duty] = m.s[m.s.length - 1];
+    last = m;
+    const [, , rpm, duty] = m.s[m.s.length - 1];
     if (motor) motor.set(rpm, duty / 100, m.fault);
-    if (!$('motor').classList.contains('on')) return;
-    $('mo-vsp').textContent = sp.toFixed(0); $('mo-vrpm').textContent = rpm.toFixed(1); $('mo-vduty').textContent = duty.toFixed(1);
-    $('mo-fault').textContent = m.fault ? 'STALL: output forced off (reset the target)' : 'none';
-    document.querySelectorAll('[data-m]').forEach(b => b.classList.toggle('on', b.dataset.m.toUpperCase() === m.mode));
-    if (chartSpeed) { chartSpeed.setData([T, SP, RPM]); chartDuty.setData([T, DUTY]); }
+    if ($('motor').classList.contains('on')) refresh();
   });
 }
 
+/* Values, mode, fault and curves from the latest telemetry (also when the view opens on a paused replay). */
+function refresh() {
+  if (!last) return;
+  const [, sp, rpm, duty] = last.s[last.s.length - 1];
+  $('mo-vsp').textContent = sp.toFixed(0); $('mo-vrpm').textContent = rpm.toFixed(1); $('mo-vduty').textContent = duty.toFixed(1);
+  $('mo-fault').textContent = last.fault ? 'STALL: output forced off (latched: reset the target)' : 'none';
+  $('mo-fault').className = last.fault ? 'bad-text' : '';
+  document.querySelectorAll('[data-m]').forEach(b => b.classList.toggle('on', b.dataset.m.toUpperCase() === last.mode));
+  if (chartSpeed) { chartSpeed.setData([T, SP, RPM]); chartDuty.setData([T, DUTY]); }
+}
+
 export function resize() {
-  if (!chartSpeed) return;
-  chartSpeed.setSize({ width: $('mo-speed').clientWidth, height: $('mo-speed').clientHeight });
-  chartDuty.setSize({ width: $('mo-duty').clientWidth, height: $('mo-duty').clientHeight });
+  if (chartSpeed) {
+    chartSpeed.setSize({ width: $('mo-speed').clientWidth, height: $('mo-speed').clientHeight });
+    chartDuty.setSize({ width: $('mo-duty').clientWidth, height: $('mo-duty').clientHeight });
+  }
+  refresh();
 }

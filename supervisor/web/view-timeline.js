@@ -105,6 +105,6 @@ function draw() {
     g.fillStyle = css('--fg'); g.globalAlpha = 0.92; g.fillRect(xx, 4, w, 20); g.globalAlpha = 1;
     g.fillStyle = css('--card'); g.fillText(label, xx + 6, 18);
   }
-  $('tl-info').innerHTML = `${ev.length} events in memory · lost: ${S.traceDropStm} on the target, ${S.traceDropGw} on the supervisor`
+  $('tl-info').innerHTML = `${ev.length} events in memory · lost since start: ${S.traceDropStm} on the target, ${S.traceDropGw} on the gateway`
     + (r.running != null ? ` · on the CPU at the last event: <b>${escapeHtml(S.tasks.get(r.running)?.cfg?.name ?? 'task ' + r.running)}</b>` : '');
 }
