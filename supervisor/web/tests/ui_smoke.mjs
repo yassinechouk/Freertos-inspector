@@ -16,7 +16,7 @@ for (const scheme of ['light', 'dark']) {
   page.on('console', m => { if (m.type() === 'error' && !/WebSocket|ws:\/\/|favicon|Failed to load resource/.test(m.text())) errors.push(`[${scheme}] console: ${m.text()}`); });
   page.on('response', r => { if (r.status() >= 400 && !/favicon/.test(r.url())) errors.push(`[${scheme}] HTTP ${r.status()}: ${r.url()}`); });
   await page.goto(`${base}/index.html?session=tests/fixture-session.json`);
-  await page.waitForTimeout(4500);                         // let the 4 s fixture play
+  await page.waitForTimeout(8500);                         // let the 9 s fixture play past the injected fault
   for (const v of views) {
     await page.click(`.tab[data-view="${v}"]`);
     if (v === 'tasks') await page.click('#tk-body tr[data-tag="3"]');
@@ -25,6 +25,13 @@ for (const scheme of ['light', 'dark']) {
     await page.screenshot({ path: `${out}/${scheme}-${v}.png`, fullPage: true });
   }
   // a few content checks: the data really reached the views
+  await page.click('.tab[data-view="overview"]');
+  await page.waitForTimeout(600);
+  const board = await page.locator('#ov-board .brow:not(.bhead)').count();
+  if (board < 10) errors.push(`[${scheme}] inspector board has ${board} task rows`);
+  const late = await page.locator('#ov-board .brow.s-bad').count();
+  if (late < 1) errors.push(`[${scheme}] the injected CPU hog made no task late on the board`);
+  if (!/On the CPU at the last event/.test(await page.textContent('#ov-strip-legend') || '')) errors.push(`[${scheme}] CPU strip legend missing`);
   await page.click('.tab[data-view="tasks"]');
   const rows = await page.locator('#tk-body tr').count();
   if (rows < 5) errors.push(`[${scheme}] tasks table has ${rows} rows`);
@@ -41,7 +48,7 @@ for (const scheme of ['light', 'dark']) {
 const phone = await browser.newPage({ viewport: { width: 390, height: 844 } });
 phone.on('pageerror', e => errors.push(`[phone] page error: ${e.message}`));
 await phone.goto(`${base}/index.html?session=tests/fixture-session.json`);
-await phone.waitForTimeout(3000);
+await phone.waitForTimeout(4000);
 const overflow = await phone.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
 if (overflow > 2) errors.push(`[phone] horizontal overflow of ${overflow}px`);
 await phone.screenshot({ path: `${out}/phone-overview.png`, fullPage: true });
