@@ -55,3 +55,7 @@ early phases are in [MEASUREMENTS.md](MEASUREMENTS.md#key-findings-so-far).
     now resets both sides and restarts on error or after 2 s of silence.
 15. **Flag stale data.** A Live Expressions view showing statistics accumulated before the plant was running
     looked like a broken encoder. Worst cases "since reset" need a reset before a test.
+16. **A fault injector has timing assumptions too.** The priority-inversion demo woke the low task, waited a fixed
+    2 ms, then woke the high task. On the bench the low task (priority 9) only got the CPU 5.5 ms later, so the high
+    task found the mutex free: no inversion, and the probe rightly reported none. The trace of the recorded session
+    showed the order of events at once. The injector now waits until the low task really holds the mutex.

@@ -18,6 +18,7 @@
 
 #define FL_HOG_MS       150U    /* CPU hog: one job of 150 ms without blocking */
 #define FL_HOLD_MS        6U    /* inversion: time the low task holds the mutex */
+#define FL_HOLD_WAIT_MS 100U    /* inversion: longest wait for the low task to take the mutex */
 #define FL_FLOOD         40U    /* queue: items pushed at once */
 #define FL_RX_PERIOD_MS  20U    /* queue: one item consumed every 20 ms */
 #define FL_HEAP_HOLD_MS 3000U
@@ -35,6 +36,7 @@ static SemaphoreHandle_t mtx;
 
 static volatile uint8_t pending;   /* fault requested, 0 = none */
 static volatile uint8_t busy;
+static volatile uint8_t lowHolds;  /* inversion: 1 while the low task holds the mutex */
 
 static void busy_wait_ms(uint32_t ms)
 {
@@ -91,8 +93,13 @@ static void CtlTask(void *arg)
         }
         break;
       case HIL_FAULT_INVERSION:
-        xTaskNotifyGive(hLow);                        /* low task takes the mutex */
-        vTaskDelay(pdMS_TO_TICKS(2));
+        xTaskNotifyGive(hLow);                        /* low task takes the mutex... */
+        for (uint32_t ms = 0U; (lowHolds == 0U) && (ms < FL_HOLD_WAIT_MS); ms++)
+        {
+          vTaskDelay(pdMS_TO_TICKS(1));               /* ...when it gets the CPU: at priority 9 under load,
+                                                         that took 5.5 ms on the bench, so a fixed 2 ms wait
+                                                         let the high task find the mutex free */
+        }
         xTaskNotifyGive(hHigh);                       /* high task now needs it */
         vTaskDelay(pdMS_TO_TICKS(20));
         break;
@@ -115,7 +122,9 @@ static void LowTask(void *arg)
     (void)ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
     if (xSemaphoreTake(mtx, portMAX_DELAY) == pdTRUE)
     {
+      lowHolds = 1U;
       busy_wait_ms(FL_HOLD_MS);                       /* boosted to 21 while the high task waits */
+      lowHolds = 0U;
       (void)xSemaphoreGive(mtx);
     }
   }
