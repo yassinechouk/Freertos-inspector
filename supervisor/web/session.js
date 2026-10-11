@@ -34,14 +34,14 @@ export function stopRecording() {
   const blob = new Blob([JSON.stringify(file)], { type: 'application/json' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = `rtos-doctor-session-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.json`;
+  a.download = `freertos-inspector-session-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.json`;
   a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 10000);
 }
 
 export function loadSession(text) {
   const f = JSON.parse(text);
-  if (f.format !== 'rtos-doctor-session' || !Array.isArray(f.messages)) throw new Error('not an RTOS Doctor session file');
+  if (f.format !== 'rtos-doctor-session' || !Array.isArray(f.messages)) throw new Error('not a FreeRTOS Inspector session file');
   S.source = 'replay';
   reset();
   S.synthetic = !!f.synthetic;

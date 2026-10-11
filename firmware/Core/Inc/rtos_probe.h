@@ -1,4 +1,4 @@
-/* RTOS Doctor probe for FreeRTOS: observes an application without touching its tasks.
+/* FreeRTOS Inspector probe for FreeRTOS: observes an application without touching its tasks.
 
    What it measures, from kernel trace hooks only (no code in the application's tasks):
      - every task, discovered when FreeRTOS creates it (name, priority, stack);

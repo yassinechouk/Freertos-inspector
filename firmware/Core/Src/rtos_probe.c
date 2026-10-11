@@ -1,4 +1,4 @@
-/* RTOS Doctor probe for FreeRTOS, see rtos_probe.h. */
+/* FreeRTOS Inspector probe for FreeRTOS, see rtos_probe.h. */
 #include "rtos_probe.h"
 #include "stm32l4xx.h"
 #include "hil_proto.h"

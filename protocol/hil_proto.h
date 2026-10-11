@@ -1,4 +1,4 @@
-/* RTOS Doctor link protocol: target (STM32 + rtos_probe) <-> supervisor gateway (Elyssa).
+/* FreeRTOS Inspector link protocol: target (STM32 + rtos_probe) <-> supervisor gateway (Elyssa).
    UART 2 Mbaud 8N1. Single source of truth. Copies live in firmware/Core/Inc and supervisor/
    (see tools/sync_proto.ps1): edit THIS file, then run the script.
 

@@ -169,7 +169,7 @@ standard names. */
 /* USER CODE BEGIN Defines */
 /* Section where parameter definitions can be added (for instance, to override default ones in FreeRTOS.h) */
 
-/* RTOS Doctor probe (Core/Src/rtos_probe.c). These macros expand inside tasks.c and queue.c,
+/* FreeRTOS Inspector probe (Core/Src/rtos_probe.c). These macros expand inside tasks.c and queue.c,
    where the kernel structures are visible: they READ fields and pass plain values to the probe,
    and write only pxTaskTag (owned by the probe). Nothing in the application's tasks changes. */
 #define configUSE_APPLICATION_TASK_TAG          1   /* pxTaskTag = probe tag */

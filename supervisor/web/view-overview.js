@@ -80,7 +80,7 @@ function renderHero(v, tasks, a) {
     tile('Tightest task', tight ? escapeHtml(tight.t.name) : '–', !tight ? '&nbsp;' : tight.m < 0 ? `computed R ${(-tight.m * 100).toFixed(0)} % over the deadline` : `${(tight.m * 100).toFixed(0)} % margin (computed)`, tight && tight.m < 0 ? 'bad' : tight && tight.m < 0.2 ? 'warn' : '', 'Smallest margin between the worst-case response time computed by the analysis and the deadline'),
     tile('Tasks', tasks.length || '–', `${withD.length} with a deadline`, '', 'Discovered automatically when FreeRTOS created them'),
     tile('Utilisation', a.list.length ? (a.U * 100).toFixed(1) + ' %' : '–', a.list.length ? `bound ${(a.LL * 100).toFixed(0)} % (Liu-Layland)` : '&nbsp;', a.U > 1 ? 'bad' : '', 'Sum of C/T over the analysed tasks and interrupts'),
-    tile('Probe cost', s ? (s.probe / 10).toFixed(2) + ' %' : '–', 'CPU spent observing', s && s.probe > 20 ? 'warn' : '', 'CPU time spent in the RTOS Doctor hooks'),
+    tile('Probe cost', s ? (s.probe / 10).toFixed(2) + ' %' : '–', 'CPU spent observing', s && s.probe > 20 ? 'warn' : '', 'CPU time spent in the FreeRTOS Inspector hooks'),
   ].join('');
 }
 

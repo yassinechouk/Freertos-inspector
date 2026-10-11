@@ -1,10 +1,10 @@
-# RTOS Doctor
+# FreeRTOS Inspector
 
-**A live inspector for FreeRTOS.** It finds every task by itself, measures its timing on the target, checks every
+**Live timing inspection for FreeRTOS applications.** It finds every task by itself, measures its timing on the target, checks every
 deadline by calculation and by measurement, and shows the result so that anyone can read it at a glance.
 Built and proven on a hardware-in-the-loop motor-control bench (STM32 + two ESP32-S3).
 
-[![ci](https://github.com/yassinechouk/freertos-hil-motor-control/actions/workflows/ci.yml/badge.svg)](https://github.com/yassinechouk/freertos-hil-motor-control/actions/workflows/ci.yml)
+[![ci](https://github.com/yassinechouk/Freertos-inspector/actions/workflows/ci.yml/badge.svg)](https://github.com/yassinechouk/Freertos-inspector/actions/workflows/ci.yml)
 
 ![The Inspector: verdict, what runs on the CPU, and every task with its priority, period, deadline and response time](docs/images/inspector.png)
 
@@ -16,7 +16,7 @@ An RTOS runs several tasks on one CPU, by priority. In a real-time system a late
 periodic task has a **deadline**. Timing bugs are invisible: a deadline missed once in a thousand, a stack close to
 overflowing, a mutex blocking a high-priority task. Nothing crashes, nothing prints.
 
-RTOS Doctor makes them visible. Every number is **measured on the target** or **computed from those measurements**,
+FreeRTOS Inspector makes them visible. Every number is **measured on the target** or **computed from those measurements**,
 with the steps shown: *compute the timing first, then verify it by measurement.*
 
 ## What you see

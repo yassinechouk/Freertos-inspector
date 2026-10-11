@@ -1,4 +1,4 @@
-// RTOS Doctor dashboard: connection to the supervisor, navigation, session controls.
+// FreeRTOS Inspector dashboard: connection to the supervisor, navigation, session controls.
 import { S, bus, ingest, ingestTrace } from './store.js';
 import * as session from './session.js';
 import './alerts.js';

@@ -1,4 +1,4 @@
-/* Fault lab: deliberate, bounded faults that prove the RTOS Doctor detectors work.
+/* Fault lab: deliberate, bounded faults that prove the FreeRTOS Inspector detectors work.
    Isolated demo tasks, all below the acquisition / control task (priority 22), so the
    motor loop keeps running whatever is injected. One fault at a time. */
 #ifndef FAULTLAB_H

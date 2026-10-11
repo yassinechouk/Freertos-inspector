@@ -165,7 +165,7 @@ typedef struct
    high-priority receiver; the receiver measures the delay with DWT. */
 #define CTX_RX_PRIORITY       24U   /* highest: wakes immediately           */
 #define CTX_TX_PRIORITY       21U   /* 5 ms period: above A (10 ms) and B (25 ms), rate-monotonic.
-                                       Was 12: RTOS Doctor measured ~40 misses/s, R = 7.7 ms > T = 5 ms */
+                                       Was 12: FreeRTOS Inspector measured ~40 misses/s, R = 7.7 ms > T = 5 ms */
 #define CTX_TX_PERIOD_MS      5U
 
 /* Setpoint acquisition: TIM3 (10 kHz) -> ADC1 -> circular DMA, 2 x 10 samples.
@@ -840,7 +840,7 @@ static void link_supervise(void)
   }
 }
 
-/* ---- RTOS Doctor frames (rtos_probe.h -> hil_proto.h HIL_T_TASK_* / TRACE / RTOS_SYS / QUEUE) ---- */
+/* ---- FreeRTOS Inspector frames (rtos_probe.h -> hil_proto.h HIL_T_TASK_* / TRACE / RTOS_SYS / QUEUE) ---- */
 
 static uint32_t trCycTmp[LINK_TRACE_MAX_EVENTS];
 static uint8_t  trIdTmp[LINK_TRACE_MAX_EVENTS];
@@ -1228,7 +1228,7 @@ int main(void)
                             LINK_PRIORITY, link_Stack, &link_TCB);
   configASSERT(hLink != NULL);
 
-  /* Fault lab: demo tasks that inject faults on request (HIL_T_CMD_FAULT). The RTOS Doctor
+  /* Fault lab: demo tasks that inject faults on request (HIL_T_CMD_FAULT). The FreeRTOS Inspector
      probe needs no registration: every task is discovered when FreeRTOS creates it. */
   faultlab_init();
 

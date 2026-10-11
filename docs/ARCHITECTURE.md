@@ -1,6 +1,6 @@
 # Architecture
 
-RTOS Doctor has four parts: a **probe** inside the FreeRTOS application, a **framed link** to a
+FreeRTOS Inspector has four parts: a **probe** inside the FreeRTOS application, a **framed link** to a
 **gateway** (Elyssa, ESP32-S3), and a **dashboard** that runs in the browser. The motor bench
 (STM32 + ESP32 plant) is the demonstration workload, not the product.
 

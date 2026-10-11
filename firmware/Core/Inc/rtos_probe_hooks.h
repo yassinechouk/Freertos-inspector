@@ -1,4 +1,4 @@
-/* RTOS Doctor probe: the functions called by the FreeRTOS trace macros.
+/* FreeRTOS Inspector probe: the functions called by the FreeRTOS trace macros.
    Included from FreeRTOSConfig.h, so it must not include any FreeRTOS header.
    The macros themselves (FreeRTOSConfig.h, USER CODE Defines) read the kernel
    structures inline, inside tasks.c / queue.c, and only pass plain values here. */
