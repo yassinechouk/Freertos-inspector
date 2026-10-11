@@ -13,7 +13,9 @@ export const S = {
   trace: [],             // [cycles (unwrapped), id]
   traceDropStm: 0, traceDropGw: 0,
   lossHist: [],          // once per second: cumulative trace losses and CRC errors (for "last 10 s")
+  loadHist: [],          // once per second: CPU load in % (100 - idle)
   isrMaxCyc: 0,
+  synthetic: false,      // the replayed session is synthetic (simulated, not measured)
   connected: false,      // browser <-> supervisor
   source: 'live',        // 'live' | 'replay'
 };
@@ -24,7 +26,7 @@ const emit = (name, detail) => bus.dispatchEvent(new CustomEvent(name, { detail 
 export function reset() {
   S.tasks.clear(); S.queues.clear();
   S.sys = null; S.gw = null; S.tel = []; S.events = []; S.trace = [];
-  S.traceDropStm = 0; S.traceDropGw = 0; S.isrMaxCyc = 0; S.lossHist = [];
+  S.traceDropStm = 0; S.traceDropGw = 0; S.isrMaxCyc = 0; S.lossHist = []; S.loadHist = [];
   lastRaw = null; wraps = 0;
   emit('update');
 }
@@ -65,6 +67,7 @@ export function ingest(m) {
       S.sys = m;
       if (m.fcpu) S.fcpu = m.fcpu;
       push(S.lossHist, { t: Date.now(), drop: m.drop + S.traceDropGw, crc: S.gw ? S.gw.crc : 0 });
+      push(S.loadHist, 100 - m.idle / 10);
       break;
     case 'sys':
       S.gw = m;
@@ -130,10 +133,25 @@ export function fmtTime(cyc) {
 export const STATES = ['running', 'ready', 'blocked', 'suspended', 'deleted'];
 export function taskName(tag) { const t = S.tasks.get(tag); return t && t.cfg ? t.cfg.name : `task ${tag}`; }
 export function queueName(qid) { const q = S.queues.get(qid); return q ? q.name : `queue ${qid}`; }
+/* Categorical palette (validated for colour-vision deficiency, light and dark steps). Colour follows
+   the task, never its rank: the first eight tasks created (tag 1..8) get a hue each, later ones share
+   a neutral grey, and their name is always printed next to the colour. */
+const PALETTE = {
+  light: ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#008300', '#6250d6', '#e34948'],
+  dark: ['#3987e5', '#d95926', '#199e70', '#c98500', '#d55181', '#008300', '#9085e9', '#e66767'],
+};
+const darkMode = () => typeof matchMedia === 'function' && matchMedia('(prefers-color-scheme: dark)').matches;
 export function color(tag) {
   const t = S.tasks.get(tag);
-  if (t && t.cfg && (t.cfg.flags & 1)) return '#8a94a6';      // idle
-  return `hsl(${(tag * 67) % 360} 62% 52%)`;
+  if (t && t.cfg && (t.cfg.flags & 1)) return darkMode() ? '#4a4f59' : '#c9cdd4';    // idle
+  const p = PALETTE[darkMode() ? 'dark' : 'light'];
+  return tag >= 1 && tag <= p.length ? p[tag - 1] : (darkMode() ? '#7d8594' : '#8a919c');
+}
+/* Milliseconds with a precision that fits the value: 0.012 ms, 1.25 ms, 25.0 ms, 1000 ms. */
+export function fmtMs(cyc) {
+  if (cyc == null || !isFinite(cyc)) return cyc === Infinity ? '∞' : '–';
+  const ms = cyc / S.fcpu * 1000;
+  return (ms < 0.1 ? ms.toFixed(3) : ms < 10 ? ms.toFixed(2) : ms < 100 ? ms.toFixed(1) : ms.toFixed(0)) + ' ms';
 }
 export function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));

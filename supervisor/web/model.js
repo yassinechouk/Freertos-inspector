@@ -1,16 +1,17 @@
 // Builds the analysis model from the measurements (and the what-if edits), runs the analysis,
 // and grades the system. Used by the Overview, Tasks and Analysis views.
-import { S } from './store.js';
+import { S, sortedTasks } from './store.js';
 import { responseTimes, utilisation, llBound, rmViolations } from './analysis-core.js';
 
 /* Worst value of the last N seconds of a per-second history (0 if none). */
-const recentMax = (a, n = 10) => Math.max(0, ...(a || []).slice(-n));
+export const recentMax = (a, n = 10) => Math.max(0, ...(a || []).slice(-n));
 
 /* Periodic or sporadic tasks with a measured release interval. All times in CPU cycles.
    C = the what-if value if set, else the worst C measured in the last 10 s. Not the worst since
    reset: after an overload, a task that vTaskDelayUntil() lets catch up runs several periods in
    one job, and that one job would dominate the analysis for ever. D = explicit deadline, else the
-   measured mean period (implicit deadline). */
+   measured mean period (implicit deadline), except for event-driven tasks (irregular releases and
+   no declared deadline): they still interfere with lower tasks, but have no deadline to check. */
 export function buildModel() {
   const list = [];
   for (const [tag, t] of S.tasks) {
@@ -19,7 +20,7 @@ export function buildModel() {
     const T = t.what.period != null ? t.what.period / 1000 * S.fcpu : t.st.tavg;
     const Cmeas = recentMax(t.hist.cmax) || t.st.cmax;
     if (!T || !Cmeas) continue;                                   // period or C not known yet
-    const D = t.cfg.deadline ? t.cfg.deadline / 1000 * S.fcpu : T;
+    const D = t.cfg.deadline ? t.cfg.deadline / 1000 * S.fcpu : irregular(t.st) ? 0 : T;
     list.push({
       id: tag, name: t.cfg.name,
       prio: t.what.prio ?? t.cfg.prio,
@@ -48,11 +49,48 @@ export function analyse() {
   for (const i of list) {
     const r = rta.get(i.id);
     i.R = r.R; i.steps = r.steps; i.ok = r.ok;
-    i.margin = isFinite(i.R) && i.D ? 1 - i.R / i.D : -Infinity;
+    i.margin = !i.D ? null : isFinite(i.R) ? 1 - i.R / i.D : -Infinity;   // null: no deadline
   }
   const U = utilisation(list, irq);
   const n = list.length + irq.length;
   return { list, irq, ctx, U, LL: llBound(n), rm: rmViolations(list) };
+}
+
+/* Releases too irregular to call it periodic: worst deviation above half the mean interval. */
+export function irregular(st) {
+  return !!(st && st.tavg && Math.max(st.tmax - st.tavg, st.tavg - st.tmin) > 0.5 * st.tavg);
+}
+
+/* What the views show for each task, highest priority first:
+   kind: 'periodic' | 'event' (no regular period and no declared deadline) | 'idle' | 'new' (no job yet);
+   T and D in cycles (D = 0: no deadline to check), R = worst response of the last 10 s,
+   Rc = worst case computed by the analysis, status { s: ok|warn|bad|off, text }. */
+export function describeTasks(a = analyse()) {
+  const byId = new Map(a.list.map(i => [i.id, i]));
+  return sortedTasks().map(([tag, t]) => {
+    const c = t.cfg, st = t.st, m = byId.get(tag);
+    const idle = !!(c.flags & 1);
+    const declared = c.deadline ? c.deadline / 1000 * S.fcpu : 0;
+    const T = st && st.tavg ? st.tavg : 0;
+    const kind = idle ? 'idle' : !st || (!T && !st.rmax) ? 'new' : !declared && (!T || irregular(st)) ? 'event' : 'periodic';
+    const D = declared || (kind === 'periodic' ? T : 0);
+    const R = st ? (recentMax(t.hist.rmax) || st.rmax) : 0;
+    const C = st ? (recentMax(t.hist.cmax) || st.cmax) : 0;
+    const miss10 = recentMisses(t);
+    const margin = m && isFinite(m.R) && D ? 1 - m.R / D : null;
+    let status;
+    if (idle) status = { s: 'off', text: 'Idle task' };
+    else if (!st) status = { s: 'off', text: 'Waiting for data' };
+    else if (kind === 'new') status = { s: 'off', text: 'No job measured yet' };
+    else if (D && miss10) status = { s: 'bad', text: `Late: ${miss10} miss${miss10 > 1 ? 'es' : ''} (10 s)` };
+    else if (D && m && m.ok === false) status = { s: 'bad', text: 'Not guaranteed' };
+    else if (D && margin !== null && margin < 0.2) status = { s: 'warn', text: `Tight: ${Math.max(0, margin * 100).toFixed(0)} % margin` };
+    else if (D) status = { s: 'ok', text: margin !== null ? `On time: ${(margin * 100).toFixed(0)} % margin` : 'On time' };
+    else status = { s: 'off', text: 'Event-driven' };
+    return { tag, t, name: c.name, prio: c.prio, prioNow: st ? st.prio : c.prio, idle, kind, T, D, declared: !!declared,
+      C, Cavg: st ? st.cavg : 0, R, Rc: m ? m.R : null, miss10, misses: st ? st.miss : 0, cpu: st ? st.cpu / 10 : 0,
+      state: st ? st.state : null, status };
+  });
 }
 
 /* Misses reported during the last N seconds, from the per-task history. */
@@ -66,7 +104,8 @@ export function health(a = analyse()) {
   const tasks = [...S.tasks.values()].filter(t => t.cfg && t.st);
 
   // Scheduling: deadlines in the analysis and in the measurements
-  const missing = tasks.filter(t => recentMisses(t) > 0);
+  const judged = t => t.cfg.deadline || !irregular(t.st);          // event-driven tasks have no deadline
+  const missing = tasks.filter(t => judged(t) && recentMisses(t) > 0);
   const notGuaranteed = a.list.filter(i => i.ok === false);
   const tight = a.list.filter(i => i.ok && i.margin < 0.2);
   h.sched = !a.list.length ? { s: 'off', text: 'waiting for measurements' }

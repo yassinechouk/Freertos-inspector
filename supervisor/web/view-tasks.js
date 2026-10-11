@@ -1,9 +1,10 @@
-// Tasks: what is configured and how each task behaves. Click a row for its detail card.
-import { S, sortedTasks, color, fmtTime, escapeHtml, STATES } from './store.js';
-import { analyse, recentMisses } from './model.js';
+// Tasks: every number the probe measures for each task, then a card with curves for the selected one.
+import { S, color, fmtMs, escapeHtml, STATES } from './store.js';
+import { analyse, describeTasks } from './model.js';
 
 const $ = id => document.getElementById(id);
-let selected = null;
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+let selected = null, chartRC = null, chartCpu = null, chartTag = null;
 
 export function init() {
   $('tk-body').addEventListener('click', e => {
@@ -12,6 +13,7 @@ export function init() {
     selected = +tr.dataset.tag;
     render();
   });
+  addEventListener('resize', resizeCharts);
 }
 
 function stackCell(t) {
@@ -24,65 +26,99 @@ function stackCell(t) {
 
 export function render() {
   const a = analyse();
-  const byTag = new Map(a.list.map(i => [i.id, i]));
-  const rows = sortedTasks();
-  $('tk-body').innerHTML = rows.map(([tag, t]) => {
-    const c = t.cfg, s = t.st || {}, m = byTag.get(tag);
-    const idle = c.flags & 1;
+  const tasks = describeTasks(a);
+  if (selected === null && tasks.length) selected = (tasks.find(t => !t.idle) || tasks[0]).tag;
+  $('tk-body').innerHTML = tasks.map(d => {
+    const t = d.t, c = t.cfg, s = t.st || {};
     const boosted = s.prio != null && s.prio !== c.prio;
-    const miss10 = recentMisses(t);
-    const cls = miss10 ? 'bad' : m && m.ok === false ? 'bad' : m && m.margin < 0.2 ? 'warn' : '';
     const jitter = s.tavg ? Math.max(s.tmax - s.tavg, s.tavg - s.tmin) : 0;
-    return `<tr data-tag="${tag}" class="${cls} ${selected === tag ? 'sel' : ''}">
-      <td><i class="sw" style="background:${color(tag)}"></i>${escapeHtml(c.name)}</td>
+    const cls = d.status.s === 'off' ? '' : d.status.s;
+    return `<tr data-tag="${d.tag}" class="${cls} ${selected === d.tag ? 'sel' : ''}">
+      <td><i class="sw" style="background:${color(d.tag)}"></i><b>${escapeHtml(c.name)}</b></td>
       <td><span class="badge st-${s.state ?? 'x'}">${STATES[s.state] ?? '–'}</span></td>
-      <td>${c.prio}${boosted ? ` <b class="boost" title="priority inherited from a mutex waiter">→ ${s.prio}</b>` : ''}</td>
-      <td>${idle ? '–' : s.tavg ? fmtTime(s.tavg) + `<br><small>±${fmtTime(jitter)}</small>` : '<small>not periodic yet</small>'}</td>
-      <td>${idle ? '–' : c.deadline ? c.deadline + ' ms' : '<small>= period</small>'}</td>
-      <td>${idle ? '–' : s.cmax ? fmtTime(s.cavg) + `<br><small>max ${fmtTime(s.cmax)}</small>` : '–'}</td>
-      <td>${idle ? '–' : s.rmax ? fmtTime(s.rmin) + ' … ' + fmtTime(s.rmax) : '–'}</td>
-      <td>${idle ? '–' : (s.miss ?? '–')}${miss10 ? ` <b class="bad-text">+${miss10}</b>` : ''}</td>
+      <td><span class="prio">${c.prio}</span>${boosted ? ` <b class="boost" title="priority inherited from a mutex waiter">→ ${s.prio}</b>` : ''}</td>
+      <td>${d.idle ? '–' : d.kind === 'periodic' ? fmtMs(d.T) + `<br><small>± ${fmtMs(jitter)}</small>` : d.kind === 'event' ? (d.T ? `~ ${fmtMs(d.T)}<br><small>irregular</small>` : '<small>on demand</small>') : '<small>no job yet</small>'}</td>
+      <td>${d.D ? fmtMs(d.D) + `<br><small>${d.declared ? 'declared' : '= period'}</small>` : '<small>none</small>'}</td>
+      <td>${d.idle || !s.cmax ? '–' : fmtMs(s.cavg) + `<br><small>max ${fmtMs(s.cmax)}</small>`}</td>
+      <td>${d.idle || !s.rmax ? '–' : fmtMs(s.rmin) + ' … ' + fmtMs(s.rmax)}</td>
+      <td>${d.Rc != null ? fmtMs(d.Rc) : '–'}</td>
+      <td>${d.idle ? '–' : (s.miss ?? '–')}${d.miss10 ? ` <b class="bad-text">+${d.miss10}</b>` : ''}</td>
       <td>${s.cpu != null ? (s.cpu / 10).toFixed(1) + ' %' : '–'}</td>
       <td>${stackCell(t)}</td></tr>`;
   }).join('');
-  renderDetail(byTag);
+  renderDetail(tasks.find(d => d.tag === selected));
 }
 
-function sparkline(canvas, values, colorCss, maxHint) {
-  const ctx = canvas.getContext('2d'), W = canvas.clientWidth, H = canvas.clientHeight, dpr = Math.min(devicePixelRatio || 1, 2);
-  canvas.width = W * dpr; canvas.height = H * dpr; ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.clearRect(0, 0, W, H);
-  if (!values.length) return;
-  const max = Math.max(maxHint || 0, ...values, 1e-9);
-  ctx.strokeStyle = colorCss; ctx.lineWidth = 1.5; ctx.beginPath();
-  values.forEach((v, i) => { const x = i / Math.max(values.length - 1, 1) * (W - 2) + 1, y = H - 2 - v / max * (H - 4); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
-  ctx.stroke();
-}
-
-function renderDetail(byTag) {
+function renderDetail(d) {
   const box = $('tk-detail');
-  const t = S.tasks.get(selected);
-  if (!t || !t.cfg) { box.innerHTML = '<p class="note">Click a task to see its card.</p>'; return; }
-  const c = t.cfg, s = t.st || {}, m = byTag.get(selected);
+  if (!d) { box.innerHTML = '<p class="note">Click a task to see its card.</p>'; chartTag = null; return; }
+  const t = d.t, c = t.cfg, s = t.st || {};
   const line = (k, v, hint = '') => `<dt title="${escapeHtml(hint)}">${k}</dt><dd>${v}</dd>`;
-  box.innerHTML = `
-    <h3><i class="sw" style="background:${color(selected)}"></i>${escapeHtml(c.name)}</h3>
-    <dl class="kv">
-      ${line('State', STATES[s.state] ?? '–')}
+  if (chartTag !== d.tag) {
+    box.innerHTML = `
+      <h3><i class="sw" style="background:${color(d.tag)}"></i>${escapeHtml(c.name)} <span class="chip ${d.status.s}">${escapeHtml(d.status.text)}</span></h3>
+      <div class="detail">
+        <dl class="kv" id="tk-kv"></dl>
+        <div class="detail-charts">
+          <div><small>Worst response time R and execution time C per second${d.D ? ', against the deadline' : ''} (ms)</small><div id="tk-rc" class="chart"></div></div>
+          <div><small>CPU share per second (%)</small><div id="tk-cpu" class="chart small"></div></div>
+        </div>
+      </div>`;
+    makeCharts(d);
+    chartTag = d.tag;
+  } else {
+    box.querySelector('h3 .chip').className = 'chip ' + d.status.s;
+    box.querySelector('h3 .chip').textContent = d.status.text;
+  }
+  $('tk-kv').innerHTML = `
       ${line('Priority', c.prio + (s.prio != null && s.prio !== c.prio ? ` (now ${s.prio}, inherited)` : ''), 'Base priority; the current one can be higher while it holds a mutex wanted by a higher-priority task')}
-      ${line('Stack', `${c.stack} words, ${s.stack ?? '–'} never used`, 'High-water mark: the free space that was never touched since reset')}
-      ${line('Release interval', s.tavg ? `${fmtTime(s.tavg)} (min ${fmtTime(s.tmin)}, max ${fmtTime(s.tmax)})` : '–', 'Time between two releases (task becoming ready). Its spread is the release jitter')}
-      ${line('Deadline', c.deadline ? c.deadline + ' ms (declared)' : 'implicit: the measured period')}
-      ${line('Execution time C', s.cmax ? `avg ${fmtTime(s.cavg)}, max ${fmtTime(s.cmax)}` : '–', 'CPU time actually used by one job (release to block), preemptions excluded')}
-      ${line('Response time R', s.rmax ? `min ${fmtTime(s.rmin)}, max ${fmtTime(s.rmax)}` : '–', 'From release to the end of the job, waits included')}
-      ${line('Computed worst R', m ? fmtTime(m.R) + (m.ok === false ? ' (exceeds the deadline)' : '') : '–', 'Response-time analysis with the measured C of every task')}
-      ${line('Deadline misses', s.miss ?? '–')}
+      ${line('Period', d.kind === 'periodic' ? `${fmtMs(d.T)} (min ${fmtMs(s.tmin)}, max ${fmtMs(s.tmax)})` : d.kind === 'event' ? (d.T ? `irregular, ${fmtMs(d.T)} on average` : 'none: runs on demand') : '–', 'Time between two releases (task becoming ready). Its spread is the release jitter')}
+      ${line('Deadline', d.D ? `${fmtMs(d.D)} (${d.declared ? 'declared with rtp_set_deadline' : 'implicit: the measured period'})` : 'none (event-driven task)')}
+      ${line('Execution time C', s.cmax ? `avg ${fmtMs(s.cavg)}, max ${fmtMs(s.cmax)} since reset` : '–', 'CPU time actually used by one job (release to block), preemptions excluded')}
+      ${line('Response time R', s.rmax ? `min ${fmtMs(s.rmin)}, max ${fmtMs(s.rmax)} since reset` : '–', 'From release to the end of the job, waits included')}
+      ${line('Computed worst R', d.Rc != null ? fmtMs(d.Rc) + (d.D && d.Rc > d.D ? ' (exceeds the deadline)' : '') : '–', 'Response-time analysis with the measured C of every task')}
+      ${line('Deadline misses', `${s.miss ?? '–'} since reset, ${d.miss10} in the last 10 s`)}
       ${line('Jobs per second', s.jobs ?? '–')}
-    </dl>
-    <div class="sparks">
-      <div><small>CPU share, last ${t.hist.cpu.length} s</small><canvas id="sp-cpu"></canvas></div>
-      <div><small>Deadline misses per second</small><canvas id="sp-miss"></canvas></div>
-    </div>`;
-  sparkline($('sp-cpu'), t.hist.cpu, color(selected));
-  sparkline($('sp-miss'), t.hist.miss, getComputedStyle(document.documentElement).getPropertyValue('--bad').trim(), 1);
+      ${line('Stack', `${c.stack} words, ${s.stack ?? '–'} never used`, 'High-water mark: the free space that was never touched since reset')}`;
+  updateCharts(d);
+}
+
+function opts(el, series, range) {
+  const axis = { stroke: css('--mut'), grid: { stroke: css('--line'), width: 1 }, ticks: { stroke: css('--line') } };
+  return {
+    width: el.clientWidth || 400, height: el.clientHeight || 180,
+    scales: { x: { time: false }, y: range ? { range } : { auto: true, range: (u, lo, hi) => [0, Math.max(hi * 1.1, 0.01)] } },
+    axes: [{ ...axis, values: (u, v) => v.map(x => x + ' s') }, axis],
+    series: [{ label: 'time', value: (u, v) => v == null ? '-' : v + ' s' }, ...series],
+    cursor: { drag: { x: false, y: false } },
+    legend: { live: true },
+  };
+}
+
+function makeCharts(d) {
+  chartRC?.destroy(); chartCpu?.destroy(); chartRC = chartCpu = null;
+  if (!window.uPlot) return;
+  const ms = (u, v) => v == null ? '-' : v.toFixed(3) + ' ms';
+  const col = color(d.tag);
+  chartRC = new uPlot(opts($('tk-rc'), [
+    { label: 'R (worst)', stroke: col, width: 2, value: ms },
+    { label: 'C (worst)', stroke: col, width: 1.5, dash: [], fill: col + '22', value: ms },
+    { label: 'deadline', stroke: css('--bad'), width: 1, value: ms },
+  ]), [[], [], [], []], $('tk-rc'));
+  chartCpu = new uPlot(opts($('tk-cpu'), [{ label: 'CPU', stroke: col, width: 2, fill: col + '22', value: (u, v) => v == null ? '-' : v.toFixed(1) + ' %' }]), [[], []], $('tk-cpu'));
+}
+
+function updateCharts(d) {
+  if (!chartRC) return;
+  const h = d.t.hist, toMs = v => v / S.fcpu * 1000;
+  const n = h.rmax.length, x = h.rmax.map((_, i) => i - n + 1);
+  chartRC.setData([x, h.rmax.map(toMs), h.cmax.map(toMs), x.map(() => (d.D ? toMs(d.D) : null))]);
+  const m = h.cpu.length;
+  chartCpu.setData([h.cpu.map((_, i) => i - m + 1), h.cpu]);
+  if (Math.abs(chartRC.width - $('tk-rc').clientWidth) > 2) resizeCharts();   // the view was hidden, or resized
+}
+
+function resizeCharts() {
+  if (chartRC) chartRC.setSize({ width: $('tk-rc').clientWidth, height: $('tk-rc').clientHeight });
+  if (chartCpu) chartCpu.setSize({ width: $('tk-cpu').clientWidth, height: $('tk-cpu').clientHeight });
 }

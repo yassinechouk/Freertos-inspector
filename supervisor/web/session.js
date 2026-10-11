@@ -44,6 +44,7 @@ export function loadSession(text) {
   if (f.format !== 'rtos-doctor-session' || !Array.isArray(f.messages)) throw new Error('not an RTOS Doctor session file');
   S.source = 'replay';
   reset();
+  S.synthetic = !!f.synthetic;
   player = { msgs: f.messages, i: 0, t0: performance.now(), speed: 1, paused: false, duration: f.messages.length ? f.messages[f.messages.length - 1][0] : 0 };
   notify();
   requestAnimationFrame(step);
@@ -86,6 +87,7 @@ export function setSpeed(x) {
 export function backToLive() {
   player = null;
   S.source = 'live';
+  S.synthetic = false;
   reset();
   notify();
 }

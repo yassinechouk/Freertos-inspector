@@ -44,6 +44,7 @@ function header() {
   const rp = session.replayState();
   if (rp) pill($('h-src'), `replay ${rp.pos}/${rp.total}${rp.paused ? ' (paused)' : ''}`, 'warn');
   else pill($('h-src'), S.connected ? `live · ${msgRate} msg/s` : 'not connected', S.connected ? 'ok' : 'bad');
+  $('h-synth').hidden = !(rp && S.synthetic);
   const g = S.gw;
   pill($('h-target'), !g ? 'target: –' : g.link ? 'target: online' : 'target: lost', !g ? '' : g.link ? 'ok' : 'bad');
   const c = alertsView.counts();
@@ -82,7 +83,7 @@ $('s-speed').onchange = () => session.setSpeed(+$('s-speed').value);
 $('s-live').onclick = () => session.backToLive();
 bus.addEventListener('session', header);
 
-for (const v of [tasks, timeline, analysis, alertsView]) v.init();
+for (const v of [overview, tasks, timeline, analysis, alertsView]) v.init();
 faults.init({ send });
 motorView.init({ send });
 
