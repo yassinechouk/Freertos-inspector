@@ -52,6 +52,7 @@ export function ingest(m) {
       const newMiss = t.prevMiss === null ? 0 : Math.max(0, m.miss - t.prevMiss);
       t.prevMiss = m.miss;
       t.st = m;
+      t.jobsSeen = (t.jobsSeen ?? 0) + (m.jobs ?? 0);  // jobs observed since the page opened
       push(t.hist.cpu, m.cpu / 10);
       push(t.hist.miss, newMiss);
       push(t.hist.cmax, m.cmaxl ?? m.cmax);       // older sessions: only the since-reset maximum

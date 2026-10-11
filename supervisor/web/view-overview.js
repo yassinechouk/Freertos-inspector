@@ -2,7 +2,7 @@
 // and for every task its priority, period, deadline, response time against that deadline,
 // start delay and trend. Then the CPU load over time, the health categories and the latest alerts.
 import { S, color, fmtMs, escapeHtml } from './store.js';
-import { analyse, health, verdict, describeTasks } from './model.js';
+import { analyse, health, verdict, describeTasks, irregular } from './model.js';
 import { alerts, titleOf } from './alerts.js';
 import { recentActivity } from './trace-model.js';
 
@@ -132,7 +132,7 @@ function renderBoard(tasks, delays) {
     const st = t.t.st || {};
     const jitter = st.tavg ? Math.max(st.tmax - st.tavg, st.tavg - st.tmin) : 0;
     const period = t.kind === 'periodic' ? `${fmtMs(t.T)}<small>± ${fmtMs(jitter)} jitter</small>`
-      : t.kind === 'event' ? (t.T ? `~ ${fmtMs(t.T)}<small>irregular</small>` : '–<small>on demand</small>') : '–<small>&nbsp;</small>';
+      : t.kind === 'event' ? (t.T ? `~ ${fmtMs(t.T)}<small>${irregular(st) ? 'irregular' : 'rare: too few jobs'}</small>` : '–<small>on demand</small>') : '–<small>&nbsp;</small>';
     const deadline = t.D ? `${fmtMs(t.D)}<small>${t.declared ? 'declared' : '= period (implicit)'}</small>`
       : `–<small>${t.idle ? '&nbsp;' : 'none'}</small>`;
     const ac = delays && delays.act.get(t.tag);

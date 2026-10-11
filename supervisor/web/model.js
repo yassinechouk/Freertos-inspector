@@ -20,7 +20,7 @@ export function buildModel() {
     const T = t.what.period != null ? t.what.period / 1000 * S.fcpu : t.st.tavg;
     const Cmeas = recentMax(t.hist.cmax) || t.st.cmax;
     if (!T || !Cmeas) continue;                                   // period or C not known yet
-    const D = t.cfg.deadline ? t.cfg.deadline / 1000 * S.fcpu : irregular(t.st) ? 0 : T;
+    const D = t.cfg.deadline ? t.cfg.deadline / 1000 * S.fcpu : periodic(t) ? T : 0;
     list.push({
       id: tag, name: t.cfg.name,
       prio: t.what.prio ?? t.cfg.prio,
@@ -61,6 +61,12 @@ export function irregular(st) {
   return !!(st && st.tavg && Math.max(st.tmax - st.tavg, st.tavg - st.tmin) > 0.5 * st.tavg);
 }
 
+/* Periodic without a declared deadline: regular releases, seen often enough to tell (5 jobs: with only one
+   interval, a task run twice by hand would look perfectly periodic, with a period of a minute). */
+export function periodic(t) {
+  return !!(t.st && t.st.tavg && !irregular(t.st) && (t.jobsSeen ?? 0) >= 5);
+}
+
 /* What the views show for each task, highest priority first:
    kind: 'periodic' | 'event' (no regular period and no declared deadline) | 'idle' | 'new' (no job yet);
    T and D in cycles (D = 0: no deadline to check), R = worst response of the last 10 s,
@@ -72,7 +78,7 @@ export function describeTasks(a = analyse()) {
     const idle = !!(c.flags & 1);
     const declared = c.deadline ? c.deadline / 1000 * S.fcpu : 0;
     const T = st && st.tavg ? st.tavg : 0;
-    const kind = idle ? 'idle' : !st || (!T && !st.rmax) ? 'new' : !declared && (!T || irregular(st)) ? 'event' : 'periodic';
+    const kind = idle ? 'idle' : !st || (!T && !st.rmax) ? 'new' : !declared && !periodic(t) ? 'event' : 'periodic';
     const D = declared || (kind === 'periodic' ? T : 0);
     const R = st ? (recentMax(t.hist.rmax) || st.rmax) : 0;
     const C = st ? (recentMax(t.hist.cmax) || st.cmax) : 0;
@@ -104,7 +110,7 @@ export function health(a = analyse()) {
   const tasks = [...S.tasks.values()].filter(t => t.cfg && t.st);
 
   // Scheduling: deadlines in the analysis and in the measurements
-  const judged = t => t.cfg.deadline || !irregular(t.st);          // event-driven tasks have no deadline
+  const judged = t => t.cfg.deadline || periodic(t);               // event-driven tasks have no deadline
   const missing = tasks.filter(t => judged(t) && recentMisses(t) > 0);
   const notGuaranteed = a.list.filter(i => i.ok === false);
   const tight = a.list.filter(i => i.ok && i.margin < 0.2);

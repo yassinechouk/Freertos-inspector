@@ -1,6 +1,6 @@
 // Tasks: every number the probe measures for each task, then a card with curves for the selected one.
 import { S, color, fmtMs, escapeHtml, STATES } from './store.js';
-import { analyse, describeTasks } from './model.js';
+import { analyse, describeTasks, irregular } from './model.js';
 
 const $ = id => document.getElementById(id);
 const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
@@ -37,7 +37,7 @@ export function render() {
       <td><i class="sw" style="background:${color(d.tag)}"></i><b>${escapeHtml(c.name)}</b></td>
       <td><span class="badge st-${s.state ?? 'x'}">${STATES[s.state] ?? '–'}</span></td>
       <td><span class="prio">${c.prio}</span>${boosted ? ` <b class="boost" title="priority inherited from a mutex waiter">→ ${s.prio}</b>` : ''}</td>
-      <td>${d.idle ? '–' : d.kind === 'periodic' ? fmtMs(d.T) + `<br><small>± ${fmtMs(jitter)}</small>` : d.kind === 'event' ? (d.T ? `~ ${fmtMs(d.T)}<br><small>irregular</small>` : '<small>on demand</small>') : '<small>no job yet</small>'}</td>
+      <td>${d.idle ? '–' : d.kind === 'periodic' ? fmtMs(d.T) + `<br><small>± ${fmtMs(jitter)}</small>` : d.kind === 'event' ? (d.T ? `~ ${fmtMs(d.T)}<br><small>${irregular(s) ? 'irregular' : 'rare'}</small>` : '<small>on demand</small>') : '<small>no job yet</small>'}</td>
       <td>${d.D ? fmtMs(d.D) + `<br><small>${d.declared ? 'declared' : '= period'}</small>` : '<small>none</small>'}</td>
       <td>${d.idle || !s.cmax ? '–' : fmtMs(s.cavg) + `<br><small>max ${fmtMs(s.cmax)}</small>`}</td>
       <td>${d.idle || !s.rmax ? '–' : fmtMs(s.rmin) + ' … ' + fmtMs(s.rmax)}</td>
