@@ -18,7 +18,6 @@ Instruments: DWT cycle counter (12.5 ns), logic analyser (FX2, up to 24 MS/s), C
 | `RCC_CR` with HSE bypass (HSEON, HSEBYP, HSERDY, CSSON, PLLON, PLLRDY = 1) | 0x0F0F0063 | 0x0F0F0063 |
 | `RCC_PLLCFGR` (PLLSRC = HSE, M = 1, N = 20, R = 2, PLLREN = 1) | 0x01001403 | 0x01001403 |
 | `RCC_CFGR` (SW = SWS = PLL, AHB/APB /1, MCO = SYSCLK/16) | 0x4100000F | 0x4100000F |
-| MCO (SYSCLK/16) on PA8, HSE source | 5.0000 MHz (analyser crystal limits the resolution) | <<FILL: measured MCO frequency>> |
 | Generator (ESP32 crystal) vs STM32 clock, 189.58 s | \|error\| < 50 ppm | **+18.2 ppm** (±0.5), see *Encoder input* |
 
 [![MCO on HSI, PulseView timing decoder](../captures/mco-hsi-timing.png)](../captures/mco-hsi-timing.png)

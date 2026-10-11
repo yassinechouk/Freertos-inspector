@@ -99,10 +99,18 @@ and relays commands. Safety: the gateway forwards a REMOTE setpoint only while t
 refreshing it, and the target falls back to 0 if no setpoint arrives for 1 s (dead-man on the operator).
 
 ## 4. The dashboard (`supervisor/web/`)
-Plain ES modules, no build step: `store.js` (state, ingestion), `model.js` + `analysis-core.js`
-(response-time analysis, health grading), `alerts.js` (events → explained alerts), `session.js`
-(record, export, replay), one module per view. The analysis is computed in the browser: the target
-only measures, so the analysis can change, explain its steps and answer "what if" without reflashing.
+Plain ES modules, no build step: `store.js` (state, ingestion), `trace-model.js` (replays the trace into
+running / ready segments, releases and start delays), `model.js` + `analysis-core.js` (response-time analysis,
+task descriptions, health grading), `alerts.js` (events → explained alerts), `session.js` (record, export,
+replay), one module per view. The landing view, **Inspector**, puts the verdict, the last 50 ms on the CPU and a
+board of every task (priority, period, deadline, response time against the deadline, status, start delay,
+trend) on one screen. The analysis is computed in the browser: the target only measures, so the analysis can
+change, explain its steps and answer "what if" without reflashing.
+
+Task kinds: a task with a declared deadline, or with regular releases, is **periodic** (deadline = the declared
+one, else the measured period); a task with irregular releases and no declared deadline is **event-driven**: it
+still interferes with lower-priority tasks in the analysis, but has no deadline to check. The bench firmware
+declares the deadlines of its periodic tasks with `rtp_set_deadline()`.
 
 Response-time analysis (fixed priorities, preemptive):
 

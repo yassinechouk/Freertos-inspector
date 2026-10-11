@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 430" width="960" height="430" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="13">
+  <title>Bench wiring: STM32 target, ESP32 motor model, Elyssa gateway</title>
+  <rect width="960" height="430" rx="12" fill="#ffffff"/>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10z" fill="#3a4250"/>
+    </marker>
+  </defs>
+
+  <!-- Target -->
+  <rect x="340" y="40" width="280" height="250" rx="10" fill="#eef4fc" stroke="#2a78d6" stroke-width="2"/>
+  <text x="480" y="66" text-anchor="middle" font-size="15" font-weight="700" fill="#141a24">NUCLEO-L476RG</text>
+  <text x="480" y="85" text-anchor="middle" fill="#3a4250">STM32 · 80 MHz · FreeRTOS + rtos_probe</text>
+  <text x="356" y="118" fill="#141a24">PA9 · TIM1 CH2</text><text x="604" y="118" text-anchor="end" fill="#5f6b7d">PWM out</text>
+  <text x="356" y="148" fill="#141a24">PA15 / PA1 · TIM2</text><text x="604" y="148" text-anchor="end" fill="#5f6b7d">encoder in</text>
+  <text x="356" y="196" fill="#141a24">PB6 · USART1 TX</text><text x="604" y="196" text-anchor="end" fill="#5f6b7d">frames out</text>
+  <text x="356" y="226" fill="#141a24">PB7 · USART1 RX</text><text x="604" y="226" text-anchor="end" fill="#5f6b7d">commands in</text>
+  <text x="356" y="270" fill="#141a24">PA0 · ADC1</text><text x="604" y="270" text-anchor="end" fill="#5f6b7d">potentiometer</text>
+
+  <!-- Motor model -->
+  <rect x="30" y="70" width="230" height="120" rx="10" fill="#eaf7f1" stroke="#1baf7a" stroke-width="2"/>
+  <text x="145" y="96" text-anchor="middle" font-size="15" font-weight="700" fill="#141a24">ESP32-S3 #1</text>
+  <text x="145" y="115" text-anchor="middle" fill="#3a4250">DC motor model</text>
+  <text x="145" y="132" text-anchor="middle" fill="#5f6b7d">K = 3000 rpm, τ = 100 ms</text>
+  <text x="46" y="160" fill="#141a24">GPIO14 · PWM capture</text>
+  <text x="46" y="178" fill="#141a24">GPIO4 / 5 · encoder A/B</text>
+
+  <!-- Gateway -->
+  <rect x="700" y="150" width="230" height="120" rx="10" fill="#f2f0fc" stroke="#6250d6" stroke-width="2"/>
+  <text x="815" y="176" text-anchor="middle" font-size="15" font-weight="700" fill="#141a24">Elyssa · ESP32-S3</text>
+  <text x="815" y="195" text-anchor="middle" fill="#3a4250">gateway and web server</text>
+  <text x="716" y="226" fill="#141a24">GPIO44 · RX</text>
+  <text x="716" y="246" fill="#141a24">GPIO43 · TX</text>
+
+  <!-- Signals -->
+  <path d="M340 113 H262" stroke="#3a4250" stroke-width="2" fill="none" marker-end="url(#a)"/>
+  <text x="301" y="106" text-anchor="middle" font-size="12" fill="#3a4250">PWM 20 kHz</text>
+  <path d="M262 173 H300 V143 H338" stroke="#3a4250" stroke-width="2" fill="none" marker-end="url(#a)"/>
+  <text x="301" y="196" text-anchor="middle" font-size="12" fill="#3a4250">quadrature</text>
+  <path d="M620 191 H698" stroke="#3a4250" stroke-width="2" fill="none" marker-end="url(#a)"/>
+  <text x="659" y="184" text-anchor="middle" font-size="12" fill="#3a4250">2 Mbaud</text>
+  <path d="M700 241 H622" stroke="#3a4250" stroke-width="2" fill="none" marker-end="url(#a)"/>
+  <text x="661" y="256" text-anchor="middle" font-size="12" fill="#3a4250">commands</text>
+
+  <!-- Browser -->
+  <rect x="740" y="40" width="150" height="56" rx="10" fill="#f4f5f7" stroke="#8a919c" stroke-width="1.5"/>
+  <text x="815" y="64" text-anchor="middle" font-weight="700" fill="#141a24">Browser</text>
+  <text x="815" y="82" text-anchor="middle" fill="#5f6b7d">elyssa.local</text>
+  <path d="M815 148 V98" stroke="#3a4250" stroke-width="2" stroke-dasharray="5 4" fill="none" marker-end="url(#a)" marker-start="url(#a)"/>
+  <text x="824" y="128" font-size="12" fill="#3a4250">Wi-Fi, WebSocket</text>
+
+  <!-- Ground and notes -->
+  <path d="M60 330 H900" stroke="#141a24" stroke-width="2"/>
+  <path d="M145 190 V330 M480 290 V330 M815 270 V330" stroke="#141a24" stroke-width="1.5"/>
+  <text x="480" y="352" text-anchor="middle" fill="#141a24" font-weight="600">common GND between the three boards · the 3V3 rails are never connected together</text>
+  <text x="480" y="378" text-anchor="middle" fill="#5f6b7d">NUCLEO board modification: SB16 and SB50 ON, SB55 OFF (8 MHz HSE from the ST-LINK MCO)</text>
+  <text x="480" y="400" text-anchor="middle" fill="#5f6b7d">details and pin map: docs/HARDWARE.md</text>
+</svg>
